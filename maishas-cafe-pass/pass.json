@@ -1,0 +1,67 @@
+{
+  "formatVersion": 1,
+  "passTypeIdentifier": "pass.com.maishascafe.loyalty",
+  "serialNumber": "MAISHAS-10001",
+  "teamIdentifier": "8ST5HCY9ZB",
+  "organizationName": "Maishas Café",
+  "description": "Tarjeta de Fidelización Maishas Café",
+  "logoText": "MAISHAS CAFÉ",
+  "foregroundColor": "rgb(44, 34, 28)",
+  "backgroundColor": "rgb(243, 237, 226)",
+  "labelColor": "rgb(138, 102, 70)",
+  "storeCard": {
+    "headerFields": [
+      {
+        "key": "stamps",
+        "label": "CAFÉS ACUMULADOS",
+        "value": "4 / 10"
+      }
+    ],
+    "primaryFields": [
+      {
+        "key": "balance",
+        "label": "NIVEL DE SOCIO",
+        "value": "Amante del Café"
+      }
+    ],
+    "secondaryFields": [
+      {
+        "key": "memberName",
+        "label": "CLIENTE",
+        "value": "Gonzalo Gómez"
+      }
+    ],
+    "auxiliaryFields": [
+      {
+        "key": "reward",
+        "label": "PRÓXIMA RECOMPENSA",
+        "value": "1 Café Gratis"
+      }
+    ],
+    "backFields": [
+      {
+        "key": "terms",
+        "label": "Términos y Condiciones",
+        "value": "Acumula 1 sello por cada compra de café. Al completar 10 sellos, obtén un café de cualquier tamaño totalmente gratis. Válido únicamente en sucursal Maishas Café."
+      },
+      {
+        "key": "instagram",
+        "label": "Instagram",
+        "value": "@maishascafe"
+      },
+      {
+        "key": "slogan",
+        "label": "Especialidad",
+        "value": "Artisan coffee"
+      }
+    ]
+  },
+  "barcodes": [
+    {
+      "format": "PKBarcodeFormatQR",
+      "message": "MAISHAS-CLIENTE-10001",
+      "messageEncoding": "iso-8859-1",
+      "altText": "MAISHAS-10001"
+    }
+  ]
+}
