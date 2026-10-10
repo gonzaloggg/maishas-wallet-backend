@@ -38,6 +38,16 @@ CERT_PEM = os.path.join(DATA_DIR, "cert.pem")
 WWDR_PEM = os.path.join(DATA_DIR, "wwdr.pem")
 DB_PATH = os.path.join(DATA_DIR, "loyalty.db")
 
+
+# Auto-inyectar certificados desde Variables de Entorno en Railway
+for env_var, file_path in [("ENV_KEY_PEM", KEY_PEM), ("ENV_CERT_PEM", CERT_PEM), ("ENV_WWDR_PEM", WWDR_PEM)]:
+    val = os.environ.get(env_var)
+    if val:
+        # Reemplazar los saltos de línea literales que a veces envían los paneles web
+        val = val.replace('\\n', '\n')
+        with open(file_path, 'w') as f:
+            f.write(val)
+
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "MaishasSecretAuthToken2026")
 DEFAULT_MESSAGE = "¡Bienvenido a Maishas Café! Aquí verás nuestras promociones."
 
