@@ -1193,7 +1193,7 @@ ANDROID_CARD_HTML = """
     <div class="wallet-top-bar">
         <div class="sync-badge">
             <span class="sync-dot"></span>
-            <span id="sync-status-label">🤖 Tarjeta Digital Sincronizada</span>
+            <span id="sync-status-label">ID: {{ client.serial }} · Sincronizado</span>
         </div>
         <button type="button" class="btn-flip" id="btn-flip-toggle" onclick="toggleBackView()">
             ⓘ Detalles / Reverso
@@ -1203,27 +1203,24 @@ ANDROID_CARD_HTML = """
     <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN BILLETERA ANDROID / GOOGLE WALLET -->
     <div class="wallet-cta-box">
         <div class="wallet-cta-title">
-            <span>📲 Guardar en tu App de Billetera</span>
-            <span style="font-size:11px; color:var(--text-muted); font-weight:500;">Android / Wallet</span>
+            <span>📲 Guardar en tu Billetera Digital</span>
+            <span style="font-size:11px; color:var(--gold); font-weight:700; font-family:ui-monospace, monospace;">{{ client.serial }}</span>
         </div>
 
-        <a href="/card/{{ client.serial }}/download.pkpass"
+        <a href="/card/{{ client.serial }}/download.pkpass?v={{ client.updated_at | urlencode }}"
            id="btn-save-wallet-top"
            class="btn-action-gold"
            onclick="onSaveToWalletClick()">
-            <span>📲 Agregar a mi Billetera / Wallet</span>
+            <span>📲 Agregar a mi Billetera / Wallet (.pkpass)</span>
         </a>
 
         <div id="wallet-download-hint" class="wallet-step-hint">
-            ✅ <strong>Pase descargado:</strong> Toca <strong>«Abrir»</strong> en la notificación de descarga de tu navegador para guardarlo en tu <strong>Billetera de Google / Android Wallet</strong>.
+            ✅ <strong>Archivo {{ client.serial }} descargado:</strong> Toca <strong>«Abrir»</strong> en la notificación de descarga de arriba para añadirlo a tu <strong>Billetera de Google / Android Wallet</strong>.
         </div>
 
         <div class="wallet-sub-links">
-            <a id="btn-intent-wallet" href="/card/{{ client.serial }}/download.pkpass" class="btn-mini-intent">
-                ⚡ Abrir directo en App Wallet
-            </a>
-            <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush()" style="border-color:rgba(212,175,55,0.4); color:#E6C280;">
-                🔔 Activar Alertas en Vivo
+            <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush()" style="border-color:rgba(212,175,55,0.45); color:#E6C280; width:100%;">
+                🔔 Activar Notificaciones de Sellos en Vivo
             </button>
         </div>
     </div>
@@ -1277,6 +1274,10 @@ ANDROID_CARD_HTML = """
 
         <!-- VISTA REVERSO (DETALLES DEL PASE) -->
         <div id="pass-back-view" class="pass-back-view">
+            <div class="back-section">
+                <div class="back-lbl">Código Único de Socio (ID)</div>
+                <div class="back-val" style="font-family:ui-monospace, monospace; font-weight:700; color:var(--gold-light);">{{ client.serial }}</div>
+            </div>
             <div class="back-section">
                 <div class="back-lbl">Mensaje de Maishas Café</div>
                 <div class="back-val" id="back-val-msg">{{ client.message }}</div>
@@ -1332,38 +1333,11 @@ ANDROID_CARD_HTML = """
         let currentTier = {{ client.tier.name | tojson }};
         let showingBack = false;
 
-        // Configurar enlace Intent nativo de Android para apps de Billetera compatibles con .pkpass
-        (function setupAndroidWalletIntent() {
-            const pkpassUrl = `${window.location.origin}/card/${SERIAL}/download.pkpass`;
-            const hostAndPath = pkpassUrl.replace(new RegExp('^https?://'), '');
-            const scheme = window.location.protocol.replace(':', '');
-            const intentHref = `intent://${hostAndPath}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=application/vnd.apple.pkpass;S.browser_fallback_url=${encodeURIComponent(pkpassUrl)};end`;
-            const intentBtn = document.getElementById('btn-intent-wallet');
-            if (intentBtn && /android/i.test(navigator.userAgent || '')) {
-                intentBtn.href = intentHref;
-            }
-        })();
-
         function onSaveToWalletClick() {
             const hint = document.getElementById('wallet-download-hint');
             if (hint) hint.style.display = 'block';
-            showLiveBanner('📲 Descargando pase para tu Billetera. Toca "Abrir" al finalizar.');
+            showLiveBanner('📲 Pase ' + SERIAL + ' descargado. Toca "Abrir" en tu navegador para guardarlo en Wallet.');
         }
-
-        // Si el cliente acaba de registrarse (?autowallet=1), lanzar automáticamente el archivo .pkpass para su Wallet
-        (function autoTriggerWalletOnRegister() {
-            const params = new URLSearchParams(window.location.search);
-            if (params.get('autowallet') === '1') {
-                const hint = document.getElementById('wallet-download-hint');
-                if (hint) hint.style.display = 'block';
-                setTimeout(() => {
-                    window.location.href = `/card/${SERIAL}/download.pkpass`;
-                }, 450);
-                if (window.history && window.history.replaceState) {
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                }
-            }
-        })();
 
         function toggleBackView() {
             showingBack = !showingBack;
@@ -3089,7 +3063,8 @@ def generate_signed_pkpass(
     birthdate=None,
     total_visits=None,
     redeemed_count=0,
-    last_action="add"
+    last_action="add",
+    for_android=False
 ):
     temp_dir = tempfile.mkdtemp(prefix=f"pass_{serial_number}_")
     try:
@@ -3121,7 +3096,7 @@ def generate_signed_pkpass(
         barcode_obj = {
             "format": "PKBarcodeFormatQR",
             "message": serial_number,
-            "messageEncoding": "iso-8859-1",
+            "messageEncoding": "utf-8",
             "altText": serial_number
         }
         pass_data["barcode"] = barcode_obj
@@ -3147,26 +3122,58 @@ def generate_signed_pkpass(
             }
         ]
 
-        pass_data["storeCard"]["primaryFields"] = []
-
         reward_status = "¡CAFÉ GRATIS! 🎉" if stamps >= 10 else f"Faltan {10 - stamps} sellos"
 
-        # 2 columnas amplias debajo del strip para que el AVISO se lea completo sin truncarse en iOS
-        pass_data["storeCard"]["secondaryFields"] = [
-            {
-                "key": "memberName",
-                "label": f"CLIENTE · {tier['short'].upper()}",
-                "value": client_name
-            },
-            {
-                "key": "promo",
-                "label": f"AVISO · {reward_status.upper()}",
-                "value": clean_visible_msg,
-                "textAlignment": "PKTextAlignmentRight"
-            }
-        ]
-
-        pass_data["storeCard"]["auxiliaryFields"] = []
+        if for_android:
+            # Google Wallet y lectores .pkpass de Android requieren primaryFields y auxiliaryFields no vacíos
+            pass_data["storeCard"]["primaryFields"] = [
+                {
+                    "key": "points",
+                    "label": "SELLOS ACUMULADOS",
+                    "value": f"{stamps} / 10"
+                }
+            ]
+            pass_data["storeCard"]["secondaryFields"] = [
+                {
+                    "key": "memberName",
+                    "label": "CLIENTE",
+                    "value": client_name
+                },
+                {
+                    "key": "vipTier",
+                    "label": "NIVEL VIP",
+                    "value": tier["short"]
+                }
+            ]
+            pass_data["storeCard"]["auxiliaryFields"] = [
+                {
+                    "key": "serialCode",
+                    "label": "CÓDIGO ID",
+                    "value": serial_number
+                },
+                {
+                    "key": "promo",
+                    "label": f"AVISO · {reward_status.upper()}",
+                    "value": clean_visible_msg
+                }
+            ]
+        else:
+            # En iPhone (iOS Apple Wallet), primaryFields vacío evita texto sobre el strip.png
+            pass_data["storeCard"]["primaryFields"] = []
+            pass_data["storeCard"]["secondaryFields"] = [
+                {
+                    "key": "memberName",
+                    "label": f"CLIENTE · {tier['short'].upper()}",
+                    "value": client_name
+                },
+                {
+                    "key": "promo",
+                    "label": f"AVISO · {reward_status.upper()}",
+                    "value": clean_visible_msg,
+                    "textAlignment": "PKTextAlignmentRight"
+                }
+            ]
+            pass_data["storeCard"]["auxiliaryFields"] = []
 
         shop_loc = get_shop_location()
         pass_data["locations"] = [
@@ -3185,19 +3192,25 @@ def generate_signed_pkpass(
         pass_data["authenticationToken"] = AUTH_TOKEN
 
         pass_data["storeCard"]["backFields"].insert(0, {
+            "key": "memberSerialId",
+            "label": "Código Único de Socio (ID)",
+            "value": serial_number
+        })
+
+        pass_data["storeCard"]["backFields"].insert(1, {
             "key": "news",
             "label": "Mensaje de Maishas Café",
             "value": message or DEFAULT_MESSAGE,
             "changeMessage": "📣 %@"
         })
 
-        pass_data["storeCard"]["backFields"].insert(1, {
+        pass_data["storeCard"]["backFields"].insert(2, {
             "key": "vipHistory",
             "label": "Historial y Nivel de Socio",
             "value": f"Nivel: {tier['name']} | Visitas históricas: {visits} | Cafés gratis canjeados: {redeemed_count} ({tier['next_goal']})"
         })
 
-        pass_data["storeCard"]["backFields"].insert(2, {
+        pass_data["storeCard"]["backFields"].insert(3, {
             "key": "liveCardLink",
             "label": "Tarjeta Digital en Vivo (Sellos y Notificaciones)",
             "value": f"{clean_host}/card/{serial_number}"
@@ -3209,7 +3222,7 @@ def generate_signed_pkpass(
         if birthdate:
             extra_info.append(f"Cumpleaños: {birthdate}")
         if extra_info:
-            pass_data["storeCard"]["backFields"].insert(3, {
+            pass_data["storeCard"]["backFields"].insert(4, {
                 "key": "memberDetails",
                 "label": "Datos del Cliente",
                 "value": " | ".join(extra_info)
@@ -3240,7 +3253,8 @@ def generate_signed_pkpass(
         )
         subprocess.run(cmd_sign, shell=True, check=True)
 
-        output_pkpass = f"/tmp/{serial_number}.pkpass"
+        suffix = "_android" if for_android else "_ios"
+        output_pkpass = f"/tmp/{serial_number}{suffix}.pkpass"
         with zipfile.ZipFile(output_pkpass, 'w', zipfile.ZIP_DEFLATED) as z:
             for root, dirs, files in os.walk(temp_dir):
                 for fname in files:
@@ -3476,37 +3490,76 @@ def register():
     else:
         platform = "ios"
 
-    serial_number = f"MAISHAS-{uuid.uuid4().hex[:6].upper()}"
     now_ts = get_utc_timestamp()
     created_sonora = get_sonora_datetime_str()
     android_active = 1 if platform == "android" else 0
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at, platform, android_active, created_at, last_action)
-           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'add')""",
-        (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts, platform, android_active, created_sonora)
-    )
+
+    # Evitar duplicados: si el cliente ya se registró con el mismo correo electrónico, reutilizar su mismo ID MAISHAS-XXXXXX
+    existing = None
+    if email:
+        existing = c.execute(
+            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate FROM clients WHERE LOWER(TRIM(email)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
+            (email,)
+        ).fetchone()
+    elif name:
+        existing = c.execute(
+            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate FROM clients WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
+            (name,)
+        ).fetchone()
+
+    if existing:
+        serial_number = existing[0]
+        stamps_val = existing[1] or 0
+        visits_val = existing[2] if existing[2] is not None else stamps_val
+        redeemed_val = existing[3] or 0
+        msg_val = existing[4] or DEFAULT_MESSAGE
+        final_phone = phone if phone else (existing[5] or "")
+        final_bdate = birthdate if birthdate else (existing[6] or "")
+        c.execute(
+            """UPDATE clients
+               SET name = ?, email = ?, phone = ?, birthdate = ?, updated_at = ?,
+                   platform = ?, android_active = CASE WHEN ? = 1 THEN 1 ELSE android_active END
+               WHERE serial = ?""",
+            (name or "Cliente", email, final_phone, final_bdate, now_ts, platform, android_active, serial_number)
+        )
+    else:
+        serial_number = f"MAISHAS-{uuid.uuid4().hex[:6].upper()}"
+        stamps_val = 0
+        visits_val = 0
+        redeemed_val = 0
+        msg_val = DEFAULT_MESSAGE
+        final_phone = phone
+        final_bdate = birthdate
+        c.execute(
+            """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at, platform, android_active, created_at, last_action)
+               VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'add')""",
+            (serial_number, name, email, final_phone, final_bdate, msg_val, now_ts, platform, android_active, created_sonora)
+        )
+
     conn.commit()
     conn.close()
 
-    # Si es Android, redirigir a su Tarjeta Digital y lanzar automáticamente la descarga del pase .pkpass para su Wallet
+    # Si es Android, redirigir a su Tarjeta Digital con el mismo ID unificado
     if platform == "android":
-        return redirect(url_for("android_card_view", serial_number=serial_number, autowallet="1"))
+        return redirect(url_for("android_card_view", serial_number=serial_number))
 
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
-        serial_number, name, 0, host_url, DEFAULT_MESSAGE,
-        phone=phone, birthdate=birthdate, total_visits=0, redeemed_count=0, last_action="add"
+        serial_number, name, stamps_val, host_url, msg_val,
+        phone=final_phone, birthdate=final_bdate, total_visits=visits_val, redeemed_count=redeemed_val,
+        last_action="add", for_android=False
     )
-    safe_name = "".join(ch if ch.isalnum() else "_" for ch in name) or "Cliente"
-    return send_file(
+    resp = send_file(
         pkpass_path,
         mimetype="application/vnd.apple.pkpass",
         as_attachment=True,
-        download_name=f"MaishasCafe_{safe_name}.pkpass"
+        download_name=f"MaishasCafe_{serial_number}.pkpass"
     )
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    return resp
 
 
 # ---------------------------------------------------------
@@ -3601,18 +3654,23 @@ def download_pkpass_direct(serial_number):
     conn.close()
     if not row:
         return "No encontrado", 404
+
+    ua = (request.headers.get("User-Agent") or "").lower()
+    is_ios = ("iphone" in ua or "ipad" in ua or "ipod" in ua) and ("android" not in ua)
     pkpass_path = generate_signed_pkpass(
         row[0], row[1], row[2] or 0, request.host_url, row[3],
         phone=row[4], birthdate=row[5], total_visits=row[6], redeemed_count=row[7] or 0,
-        last_action=row[8] or "add"
+        last_action=row[8] or "add",
+        for_android=not is_ios
     )
-    safe_name = "".join(ch if ch.isalnum() else "_" for ch in (row[1] or "Cliente"))
-    return send_file(
+    resp = send_file(
         pkpass_path,
         mimetype="application/vnd.apple.pkpass",
         as_attachment=True,
-        download_name=f"MaishasCafe_{safe_name}.pkpass"
+        download_name=f"MaishasCafe_{row[0]}.pkpass"
     )
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    return resp
 
 
 @app.route("/card/icon-192.png")
@@ -4061,10 +4119,15 @@ def get_latest_pass(pass_type_id, serial_number):
     conn.commit()
     conn.close()
 
+    auth_hdr = request.headers.get("Authorization", "")
+    ua_hdr = (request.headers.get("User-Agent") or "").lower()
+    is_android_wallet = auth_hdr.startswith("AndroidPass") or auth_hdr.startswith("AttidoPass") or "android" in ua_hdr or "walletpasses" in ua_hdr
+
     pkpass_path = generate_signed_pkpass(
         serial_number, name, stamps or 0, request.host_url, message,
         phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0,
-        last_action=last_action or "add"
+        last_action=last_action or "add",
+        for_android=is_android_wallet
     )
     response = send_file(pkpass_path, mimetype="application/vnd.apple.pkpass", conditional=False, max_age=0)
     response.headers["Last-Modified"] = formatdate(timeval=float(upd_epoch_sec), localtime=False, usegmt=True)
