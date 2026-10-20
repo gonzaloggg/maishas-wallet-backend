@@ -3,46 +3,52 @@
   "passTypeIdentifier": "pass.com.maishascafe.loyalty",
   "serialNumber": "MAISHAS-10001",
   "teamIdentifier": "8ST5HCY9ZB",
-  "organizationName": "Maishas Caf\u00e9",
-  "description": "Tarjeta de Fidelizaci\u00f3n Edici\u00f3n Halloween",
-  "logoText": "MAISHAS CAF\u00c9 \ud83c\udf83",
-  "foregroundColor": "rgb(255, 140, 0)",
-  "backgroundColor": "rgb(25, 25, 28)",
-  "labelColor": "rgb(200, 200, 200)",
+  "organizationName": "Maishas Café",
+  "description": "Tarjeta de Fidelización Maishas Café",
+  "logoText": "MAISHAS CAFÉ",
+  "foregroundColor": "rgb(245, 242, 235)",
+  "backgroundColor": "rgb(18, 16, 14)",
+  "labelColor": "rgb(198, 166, 117)",
   "storeCard": {
     "headerFields": [
       {
         "key": "stamps",
-        "label": "CAF\u00c9S ACUMULADOS",
-        "value": "4 / 10"
+        "label": "SELLOS",
+        "value": "0 / 10",
+        "textAlignment": "PKTextAlignmentRight"
       }
     ],
-    "primaryFields": [
-      {
-        "key": "balance",
-        "label": "NIVEL DE SOCIO",
-        "value": "Amante del Caf\u00e9"
-      }
-    ],
+    "primaryFields": [],
     "secondaryFields": [
       {
         "key": "memberName",
         "label": "CLIENTE",
-        "value": "Gonzalo G\u00f3mez"
+        "value": "Gonzalo Gómez"
+      },
+      {
+        "key": "balance",
+        "label": "NIVEL VIP",
+        "value": "Amante del Café ☕️"
+      },
+      {
+        "key": "reward",
+        "label": "PREMIO",
+        "value": "Faltan 10 sellos",
+        "textAlignment": "PKTextAlignmentRight"
       }
     ],
     "auxiliaryFields": [
       {
-        "key": "reward",
-        "label": "PR\u00d3XIMA RECOMPENSA",
-        "value": "1 Caf\u00e9 Gratis \ud83d\udc7b"
+        "key": "promo",
+        "label": "AVISO MAISHAS",
+        "value": "¡Bienvenido a Maishas Café! Aquí verás nuestras promociones."
       }
     ],
     "backFields": [
       {
         "key": "terms",
-        "label": "T\u00e9rminos y Condiciones",
-        "value": "Acumula 1 sello por cada compra de caf\u00e9. Al completar 10 sellos, obt\u00e9n un caf\u00e9 de cualquier tama\u00f1o totalmente gratis. V\u00e1lido \u00fanicamente en sucursal Maishas Caf\u00e9."
+        "label": "Términos y Condiciones",
+        "value": "Acumula 1 sello por cada compra de café. Al completar 10 sellos, obtén un café de cualquier tamaño totalmente gratis. Válido únicamente en sucursal Maishas Café."
       },
       {
         "key": "instagram",
@@ -52,14 +58,14 @@
       {
         "key": "slogan",
         "label": "Especialidad",
-        "value": "Artisan coffee"
+        "value": "Artisan Coffee · Maishas Café"
       }
     ]
   },
   "barcodes": [
     {
       "format": "PKBarcodeFormatQR",
-      "message": "MAISHAS-CLIENTE-10001",
+      "message": "MAISHAS-10001",
       "messageEncoding": "iso-8859-1",
       "altText": "MAISHAS-10001"
     }
