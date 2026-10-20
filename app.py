@@ -522,153 +522,16 @@ REGISTRATION_HTML = """
             color: var(--text-muted);
         }
 
-        /* Selector de Plataforma iPhone / Android */
-        .platform-switcher {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            background: rgba(18, 16, 14, 0.9);
-            border: 1px solid var(--border-glass);
-            border-radius: 14px;
-            padding: 4px;
-            gap: 4px;
-        }
-        .plat-btn {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            padding: 10px 12px;
-            border-radius: 10px;
-            font-size: 13px;
-            font-weight: 700;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: all 0.2s ease;
-        }
-        .plat-btn.active {
-            background: rgba(212, 175, 55, 0.18);
-            color: var(--gold-light);
-            border: 1px solid rgba(212, 175, 55, 0.4);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-        }
-
-        /* Previsualización Interactiva de la Tarjeta */
-        .wallet-preview {
-            background: linear-gradient(165deg, #1A1714 0%, #110F0D 100%);
-            border-radius: 20px;
-            border: 1px solid rgba(212, 175, 55, 0.32);
-            box-shadow: 0 20px 45px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.12);
-            overflow: hidden;
-        }
-        .wp-header {
-            padding: 14px 18px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .wp-logo {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-weight: 700;
-            font-size: 13px;
-            letter-spacing: 0.8px;
-        }
-        .wp-logo-icon {
-            width: 24px;
-            height: 24px;
-            border-radius: 7px;
-            background: linear-gradient(135deg, #D4AF37, #9A7B2C);
-            color: #12100E;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 13px;
-        }
-        .wp-stamps-top {
-            text-align: right;
-            font-variant-numeric: tabular-nums;
-        }
-        .wp-stamps-top .lbl {
-            display: block;
-            font-size: 9px;
-            font-weight: 700;
-            letter-spacing: 0.8px;
-            color: #C6A675;
-        }
-        .wp-stamps-top .val {
-            font-size: 15px;
-            font-weight: 700;
-        }
-        .wp-strip {
-            background: radial-gradient(circle at 50% 50%, #241E18 0%, #12100E 100%);
-            border-top: 1px solid rgba(198, 166, 117, 0.2);
-            border-bottom: 1px solid rgba(198, 166, 117, 0.2);
-            padding: 14px 22px;
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 10px;
-            justify-items: center;
-        }
-        .wp-node {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            border: 1.5px solid rgba(198, 166, 117, 0.35);
-            background: rgba(255, 255, 255, 0.02);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 11px;
-            color: rgba(198, 166, 117, 0.55);
-        }
-        .wp-node.active {
-            background: linear-gradient(135deg, #E6C280, #D4AF37);
-            border-color: #FFF2C2;
-            color: #12100E;
-            box-shadow: 0 0 12px rgba(212, 175, 55, 0.45);
-            font-weight: 800;
-        }
-        .wp-node.prize {
-            border-color: rgba(212, 175, 55, 0.75);
-            color: var(--gold-light);
-        }
-        .wp-fields {
-            padding: 12px 18px 14px;
-            display: grid;
-            grid-template-columns: 1.3fr 1fr 1fr;
-            gap: 8px;
-        }
-        .wp-field .lbl {
-            font-size: 9px;
-            font-weight: 700;
-            color: #C6A675;
-            letter-spacing: 0.6px;
-            text-transform: uppercase;
-            display: block;
-            margin-bottom: 2px;
-        }
-        .wp-field .val {
-            font-size: 12px;
-            font-weight: 600;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            display: block;
-        }
-
         .form-card {
             background: var(--bg-surface);
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border: 1px solid var(--border-glass);
             border-radius: 24px;
-            padding: 24px 22px;
+            padding: 26px 22px;
             box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
         }
-        .field-group { margin-bottom: 14px; text-align: left; }
+        .field-group { margin-bottom: 15px; text-align: left; }
         .field-label {
             display: flex;
             justify-content: space-between;
@@ -716,7 +579,7 @@ REGISTRATION_HTML = """
         }
         .btn-submit-wallet {
             width: 100%;
-            margin-top: 8px;
+            margin-top: 10px;
             padding: 15px 18px;
             border-radius: 14px;
             border: 1px solid rgba(255, 255, 255, 0.18);
@@ -730,6 +593,10 @@ REGISTRATION_HTML = """
             justify-content: center;
             gap: 8px;
             box-shadow: 0 8px 24px rgba(212, 175, 55, 0.3);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        .btn-submit-wallet:active {
+            transform: scale(0.98);
         }
         .safari-hint {
             text-align: center;
@@ -745,67 +612,17 @@ REGISTRATION_HTML = """
         <div class="brand-header">
             <span class="brand-pill">☕️ Maishas Loyalty Club</span>
             <h1>Maishas Café</h1>
-            <p>Tu membresía digital interactiva en iPhone y Android</p>
+            <p>Regístrate y acumula sellos por cada café</p>
         </div>
 
-        <!-- Selector Inteligente iPhone / Android -->
-        <div class="platform-switcher" role="tablist">
-            <button type="button" id="btn-plat-ios" class="plat-btn active" onclick="setPlatform('ios')">
-                <span> iPhone · Apple Wallet</span>
-            </button>
-            <button type="button" id="btn-plat-android" class="plat-btn" onclick="setPlatform('android')">
-                <span>🤖 Android · Wallet Digital</span>
-            </button>
-        </div>
-
-        <!-- Previsualización en Vivo -->
-        <div class="wallet-preview">
-            <div class="wp-header">
-                <div class="wp-logo">
-                    <span class="wp-logo-icon">☕️</span>
-                    <span>MAISHAS CAFÉ</span>
-                </div>
-                <div class="wp-stamps-top">
-                    <span class="lbl">SELLOS</span>
-                    <span class="val">0 / 10</span>
-                </div>
-            </div>
-            <div class="wp-strip">
-                <div class="wp-node active">☕️</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node">•</div>
-                <div class="wp-node prize">★</div>
-            </div>
-            <div class="wp-fields">
-                <div class="wp-field">
-                    <span class="lbl">CLIENTE</span>
-                    <span class="val" id="preview-name">Tu Nombre Aquí</span>
-                </div>
-                <div class="wp-field">
-                    <span class="lbl">NIVEL VIP</span>
-                    <span class="val">Amante del Café ☕️</span>
-                </div>
-                <div class="wp-field" style="text-align:right;">
-                    <span class="lbl">PREMIO</span>
-                    <span class="val">1 Café Gratis</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Formulario de Registro -->
+        <!-- Formulario de Registro Limpio con Detección Automática de Dispositivo -->
         <div class="form-card">
             <form action="/api/register" method="POST">
-                <input type="hidden" name="platform" id="platform-input" value="ios">
+                <input type="hidden" name="platform" id="platform-input" value="">
 
                 <div class="field-group">
                     <label class="field-label"><span>Nombre y Apellido</span></label>
-                    <input type="text" name="name" placeholder="Ej. Ana Sofía López" required oninput="updateCardPreview(this.value)">
+                    <input type="text" name="name" placeholder="Ej. Ana Sofía López" required>
                 </div>
 
                 <div class="field-group">
@@ -829,44 +646,29 @@ REGISTRATION_HTML = """
                     <input type="date" name="birthdate">
                     <div class="bday-incentive">
                         <span>🎁</span>
-                        <span>Recibe un regalo especial en tu Wallet el día de tu cumpleaños</span>
+                        <span>Recibe un regalo especial en tu tarjeta el día de tu cumpleaños</span>
                     </div>
                 </div>
 
                 <button type="submit" id="submit-wallet-btn" class="btn-submit-wallet">
-                    <span> Agregar a Apple Wallet</span>
+                    <span>📲 Obtener mi Tarjeta Digital</span>
                 </button>
             </form>
-            <p class="safari-hint" id="platform-hint">Compatible con <strong>Apple Wallet (iPhone)</strong> y <strong>Android Wallet Digital</strong> con notificaciones Push.</p>
+            <p class="safari-hint">Se instalará automáticamente en tu teléfono al registrarte.</p>
         </div>
     </div>
 
     <script>
-        function updateCardPreview(val) {
-            const el = document.getElementById('preview-name');
-            const clean = (val || '').trim();
-            el.textContent = clean ? clean : 'Tu Nombre Aquí';
-        }
-
-        function setPlatform(plat) {
-            document.getElementById('platform-input').value = plat;
-            document.getElementById('btn-plat-ios').classList.toggle('active', plat === 'ios');
-            document.getElementById('btn-plat-android').classList.toggle('active', plat === 'android');
-            const btn = document.getElementById('submit-wallet-btn');
-            const hint = document.getElementById('platform-hint');
-            if (plat === 'android') {
-                btn.innerHTML = '<span>🤖 Abrir mi Tarjeta en Android Wallet 📲</span>';
-                hint.innerHTML = 'Se abrirá tu <strong>Tarjeta Interactiva Android</strong> con notificaciones Push y acceso directo.';
-            } else {
-                btn.innerHTML = '<span> Agregar a Apple Wallet</span>';
-                hint.innerHTML = 'Ábrelo desde <strong>Safari en tu iPhone</strong> para instalar tu pase con un toque.';
+        // Detección 100% automática y silenciosa del tipo de celular (iPhone vs Android)
+        (function detectDeviceAutomatically() {
+            const ua = navigator.userAgent || navigator.vendor || window.opera || '';
+            const platInput = document.getElementById('platform-input');
+            if (/android/i.test(ua)) {
+                platInput.value = 'android';
+            } else if (/iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+                platInput.value = 'ios';
             }
-        }
-
-        // Auto-detectar Android vs iPhone al abrir la página
-        if (/Android/i.test(navigator.userAgent || '')) {
-            setPlatform('android');
-        }
+        })();
     </script>
 </body>
 </html>
@@ -2942,7 +2744,8 @@ def register():
     platform_req = (request.form.get("platform") or "").strip().lower()
 
     ua = (request.headers.get("User-Agent") or "").lower()
-    if platform_req == "android" or (not platform_req and "android" in ua):
+    ch_plat = (request.headers.get("Sec-CH-UA-Platform") or "").lower()
+    if platform_req == "android" or "android" in ua or "android" in ch_plat:
         platform = "android"
     else:
         platform = "ios"
