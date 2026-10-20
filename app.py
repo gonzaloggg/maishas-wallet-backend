@@ -490,9 +490,13 @@ def init_db():
             device_id TEXT,
             push_token TEXT,
             serial TEXT,
+            push_service_url TEXT,
             PRIMARY KEY (device_id, serial)
         )
     ''')
+    reg_cols = [r[1] for r in c.execute("PRAGMA table_info(registrations)")]
+    if "push_service_url" not in reg_cols:
+        c.execute("ALTER TABLE registrations ADD COLUMN push_service_url TEXT")
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS android_subscriptions (
@@ -1200,27 +1204,31 @@ ANDROID_CARD_HTML = """
         </button>
     </div>
 
-    <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN BILLETERA ANDROID / GOOGLE WALLET -->
+    <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN BILLETERA ANDROID + ACTIVAR PUSH EN VIVO -->
     <div class="wallet-cta-box">
         <div class="wallet-cta-title">
-            <span>📲 Guardar en tu Billetera Digital</span>
+            <span>📲 Billetera Digital y Alertas en Vivo</span>
             <span style="font-size:11px; color:var(--gold); font-weight:700; font-family:ui-monospace, monospace;">{{ client.serial }}</span>
         </div>
 
-        <a href="/card/{{ client.serial }}/download.pkpass?v={{ client.updated_at | urlencode }}"
-           id="btn-save-wallet-top"
-           class="btn-action-gold"
-           onclick="onSaveToWalletClick()">
-            <span>📲 Agregar a mi Billetera / Wallet (.pkpass)</span>
-        </a>
+        <div id="push-required-notice" style="background:rgba(212,175,55,0.13); border:1px solid rgba(212,175,55,0.4); border-radius:12px; padding:9px 12px; font-size:12px; color:#F5E3B3; line-height:1.4;">
+            🔔 <strong>Importante en Android:</strong> Al tocar el botón dorado selecciona <strong>«Permitir notificaciones»</strong> para que tus sellos y avisos te lleguen al instante.
+        </div>
+
+        <button type="button"
+                id="btn-save-wallet-top"
+                class="btn-action-gold"
+                onclick="saveAndActivateAndroidWallet()">
+            <span id="btn-save-wallet-label">📲 Activar Alertas y Guardar en Wallet ({{ client.stamps }}/10)</span>
+        </button>
 
         <div id="wallet-download-hint" class="wallet-step-hint">
-            ✅ <strong>Archivo {{ client.serial }} descargado:</strong> Toca <strong>«Abrir»</strong> en la notificación de descarga de arriba para añadirlo a tu <strong>Billetera de Google / Android Wallet</strong>.
+            ✅ <strong>Pase {{ client.serial }} actualizado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para actualizarlo en tu <strong>Billetera de Google</strong>, o usa esta <strong>Tarjeta en Vivo</strong> aquí abajo que se actualiza sola automáticamente.
         </div>
 
         <div class="wallet-sub-links">
-            <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush()" style="border-color:rgba(212,175,55,0.45); color:#E6C280; width:100%;">
-                🔔 Activar Notificaciones de Sellos en Vivo
+            <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush(false)" style="border-color:rgba(212,175,55,0.45); color:#E6C280; width:100%;">
+                🔔 Activar Notificaciones Push en este Android
             </button>
         </div>
     </div>
@@ -1311,12 +1319,12 @@ ANDROID_CARD_HTML = """
 
     <!-- BOTONES SECUNDARIOS DE ACCIÓN -->
     <div class="android-actions-stack">
-        <button type="button" id="btn-enable-push" class="btn-action-glass" style="border-color:rgba(212,175,55,0.35); color:#E6C280;" onclick="enableAndroidPush()">
-            <span>🔔 Activar Notificaciones Push en mi Celular</span>
+        <button type="button" id="btn-install-pwa" class="btn-action-glass" style="border-color:rgba(48,209,88,0.45); color:#66F08B;" onclick="installPWA()">
+            <span>📲 Instalar Tarjeta Automática en Pantalla de Inicio</span>
         </button>
 
-        <button type="button" id="btn-install-pwa" class="btn-action-glass" style="display:none;" onclick="installPWA()">
-            <span>📲 Instalar Acceso Directo en Pantalla de Inicio</span>
+        <button type="button" id="btn-enable-push" class="btn-action-glass" style="border-color:rgba(212,175,55,0.35); color:#E6C280;" onclick="enableAndroidPush(false)">
+            <span>🔔 Activar Notificaciones Push en mi Celular</span>
         </button>
     </div>
 
@@ -1332,11 +1340,24 @@ ANDROID_CARD_HTML = """
         let currentMessage = {{ client.message | tojson }};
         let currentTier = {{ client.tier.name | tojson }};
         let showingBack = false;
+        let autoPushAttempted = false;
 
-        function onSaveToWalletClick() {
+        function triggerPkpassDownload() {
             const hint = document.getElementById('wallet-download-hint');
             if (hint) hint.style.display = 'block';
-            showLiveBanner('📲 Pase ' + SERIAL + ' descargado. Toca "Abrir" en tu navegador para guardarlo en Wallet.');
+            showLiveBanner('📲 Descargando pase ' + SERIAL + ' (' + currentStamps + '/10 sellos). Toca "Abrir" para guardarlo en tu Billetera.');
+            window.location.href = `/card/${SERIAL}/download.pkpass?v=${Date.now()}`;
+        }
+
+        async function saveAndActivateAndroidWallet() {
+            try {
+                if ('Notification' in window && Notification.permission !== 'granted') {
+                    await enableAndroidPush(true);
+                } else {
+                    enableAndroidPush(true);
+                }
+            } catch (e) {}
+            triggerPkpassDownload();
         }
 
         function toggleBackView() {
@@ -1355,7 +1376,7 @@ ANDROID_CARD_HTML = """
             } catch (e) {}
             setTimeout(() => {
                 banner.classList.remove('show');
-            }, 6000);
+            }, 6500);
         }
 
         // 1. Registrar latido / instalación activa en Android automáticamente
@@ -1366,7 +1387,7 @@ ANDROID_CARD_HTML = """
         }
         registerAndroidHeartbeat();
 
-        // 2. Sincronización en tiempo real cada 3.5 segundos (actualiza sellos, strip.png y avisos al instante)
+        // 2. Sincronización en tiempo real cada 3 segundos (actualiza sellos, strip.png y avisos al instante)
         async function pollCardState() {
             try {
                 const res = await fetch(`/api/android/state/${SERIAL}?t=${Date.now()}`, { cache: 'no-store' });
@@ -1391,12 +1412,19 @@ ANDROID_CARD_HTML = """
                     document.getElementById('back-val-history').textContent = data.history_text;
                     document.getElementById('card-strip-img').src = `/card/${SERIAL}/strip.png?v=${encodeURIComponent(data.updated_at)}`;
 
+                    const saveLbl = document.getElementById('btn-save-wallet-label');
+                    if (saveLbl) {
+                        saveLbl.textContent = `🔄 Actualizar mi pase en Billetera (${data.stamps}/10 sellos)`;
+                    }
+
                     // Mostrar alerta estilo pantalla bloqueada según el cambio
                     if (data.stamps !== prevStamps) {
                         if (data.stamps >= 10) {
                             showLiveBanner(`🎉 ¡Felicidades! Completaste 10/10 sellos. ¡Tienes 1 Café Gratis disponible!`);
                         } else if (data.stamps === 0) {
                             showLiveBanner(`🎁 ¡Recompensa canjeada! Tu tarjeta se ha reiniciado a 0 / 10.`);
+                        } else if (data.stamps < prevStamps) {
+                            showLiveBanner(`☕️ Tu tarjeta Maishas Café está al día. Sellos acumulados: ${data.stamps} / 10`);
                         } else {
                             showLiveBanner(`☕️ ¡Has ganado 1 nuevo sello en Maishas Café! Total: ${data.stamps} / 10`);
                         }
@@ -1410,10 +1438,19 @@ ANDROID_CARD_HTML = """
                 }
             } catch (e) {}
         }
-        setInterval(pollCardState, 3500);
+        setInterval(pollCardState, 3000);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) pollCardState();
         });
+
+        // Escuchar mensajes en tiempo real desde el Service Worker cuando llega un Push
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.addEventListener('message', (event) => {
+                if (event.data && event.data.type === 'MAISHAS_PUSH') {
+                    pollCardState();
+                }
+            });
+        }
 
         // 3. Web Push (VAPID) + Service Worker para recibir notificaciones incluso con el navegador cerrado
         function urlBase64ToUint8Array(base64String) {
@@ -1427,18 +1464,42 @@ ANDROID_CARD_HTML = """
             return outputArray;
         }
 
-        async function enableAndroidPush() {
+        function markPushActiveUI() {
             const btn = document.getElementById('btn-enable-push');
             const btnTop = document.getElementById('btn-enable-push-top');
+            const notice = document.getElementById('push-required-notice');
+            if (btn) {
+                btn.innerHTML = '<span>✅ Notificaciones Push Activadas en este Android</span>';
+                btn.style.background = 'rgba(48, 209, 88, 0.2)';
+                btn.style.color = '#4AE072';
+                btn.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+            }
+            if (btnTop) {
+                btnTop.innerHTML = '✅ Alertas Push en Vivo Activadas';
+                btnTop.style.background = 'rgba(48, 209, 88, 0.2)';
+                btnTop.style.color = '#4AE072';
+                btnTop.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+            }
+            if (notice) {
+                notice.style.background = 'rgba(48, 209, 88, 0.14)';
+                notice.style.borderColor = 'rgba(48, 209, 88, 0.4)';
+                notice.style.color = '#66F08B';
+                notice.innerHTML = '✅ <strong>Notificaciones Push Activas:</strong> Recibirás alertas en tu celular cuando te agreguen sellos o promociones. Esta tarjeta digital se actualiza sola en tiempo real.';
+            }
+        }
+
+        async function enableAndroidPush(silentMode) {
             if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-                showLiveBanner('✅ Sincronización automática en vivo activada en tu navegador.');
-                return;
+                if (!silentMode) showLiveBanner('✅ Sincronización automática en vivo activada en tu navegador.');
+                return false;
             }
             try {
                 const perm = await Notification.requestPermission();
                 if (perm !== 'granted') {
-                    alert('Por favor permite las notificaciones en tu navegador para recibir alertas de sellos y promociones.');
-                    return;
+                    if (!silentMode) {
+                        alert('Para recibir alertas cuando te agreguen sellos o te envíen promociones, permite las notificaciones en tu navegador Chrome.');
+                    }
+                    return false;
                 }
                 const reg = await navigator.serviceWorker.register('/sw.js');
                 await navigator.serviceWorker.ready;
@@ -1451,43 +1512,60 @@ ANDROID_CARD_HTML = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ subscription: sub.toJSON() })
                 });
-                if (btn) {
-                    btn.innerHTML = '<span>✅ Notificaciones Push Activadas en este Android</span>';
-                    btn.style.background = 'rgba(48, 209, 88, 0.2)';
-                    btn.style.color = '#4AE072';
-                    btn.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+                markPushActiveUI();
+                if (!silentMode) {
+                    showLiveBanner('🔔 ¡Notificaciones Push activadas! Recibirás alertas de tus sellos y promociones.');
                 }
-                if (btnTop) {
-                    btnTop.innerHTML = '✅ Alertas Activas';
-                    btnTop.style.background = 'rgba(48, 209, 88, 0.2)';
-                    btnTop.style.color = '#4AE072';
-                    btnTop.style.borderColor = 'rgba(48, 209, 88, 0.45)';
-                }
-                showLiveBanner('🔔 ¡Notificaciones Push activadas! Recibirás alertas de tus sellos y promociones.');
+                return true;
             } catch (err) {
-                showLiveBanner('✅ Tarjeta vinculada y sincronizada en tiempo real.');
+                if (!silentMode) showLiveBanner('✅ Tarjeta vinculada y sincronizada en tiempo real.');
+                return false;
             }
         }
 
-        // Si ya dio permiso antes, registrar Service Worker silenciosamente
-        if ('serviceWorker' in navigator && 'Notification' in window && Notification.permission === 'granted') {
-            enableAndroidPush();
+        // Si ya dio permiso antes, registrar y sincronizar Service Worker automáticamente al abrir
+        if ('serviceWorker' in navigator && 'Notification' in window) {
+            if (Notification.permission === 'granted') {
+                enableAndroidPush(true);
+            } else if (Notification.permission === 'default') {
+                // Al primer toque en cualquier parte de la tarjeta, solicitar permiso Push automáticamente
+                document.addEventListener('click', function onFirstCardTap() {
+                    if (!autoPushAttempted && Notification.permission === 'default') {
+                        autoPushAttempted = true;
+                        enableAndroidPush(true);
+                    }
+                }, { once: true });
+            }
         }
+
+        // Si viene desde el botón de actualizar de una notificación Push, descargar el .pkpass actualizado
+        (function checkUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('auto_pkpass') === '1') {
+                setTimeout(() => { triggerPkpassDownload(); }, 400);
+            } else if (params.get('from_push') === '1') {
+                showLiveBanner(`✨ ¡Tu tarjeta está actualizada! Tienes ${currentStamps} / 10 sellos.`);
+            }
+        })();
 
         // 4. Instalación PWA ("Agregar a Pantalla de Inicio" en Android)
         let deferredPrompt = null;
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
             deferredPrompt = e;
-            document.getElementById('btn-install-pwa').style.display = 'flex';
         });
 
         async function installPWA() {
-            if (!deferredPrompt) return;
-            deferredPrompt.prompt();
-            await deferredPrompt.userChoice;
-            deferredPrompt = null;
-            document.getElementById('btn-install-pwa').style.display = 'none';
+            if ('Notification' in window && Notification.permission !== 'granted') {
+                await enableAndroidPush(true);
+            }
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                await deferredPrompt.userChoice;
+                deferredPrompt = null;
+            } else {
+                alert('📲 Para fijar tu Tarjeta Automática en tu inicio de Android:\n\n1. Toca los 3 puntos (⋮) arriba a la derecha en Chrome.\n2. Selecciona «Agregar a la pantalla principal» o «Instalar aplicación».\n\n¡Así abrirás tu tarjeta con 1 toque y tus sellos siempre estarán actualizados en vivo!');
+            }
         }
     </script>
 </body>
@@ -3707,7 +3785,14 @@ self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
 
 self.addEventListener('push', event => {
-    let data = { title: 'Maishas Café ☕️', body: 'Tu tarjeta de fidelidad se ha actualizado.', url: '/' };
+    let data = {
+        title: 'Maishas Café ☕️',
+        body: 'Tu tarjeta de fidelidad se ha actualizado.',
+        url: '/',
+        pkpass_url: '',
+        image: '',
+        serial: ''
+    };
     if (event.data) {
         try { data = Object.assign(data, event.data.json()); }
         catch (e) { data.body = event.data.text(); }
@@ -3716,26 +3801,60 @@ self.addEventListener('push', event => {
         body: data.body,
         icon: '/card/icon-192.png',
         badge: '/card/icon-192.png',
-        vibrate: [150, 70, 150],
-        data: { url: data.url || '/' }
+        vibrate: [200, 100, 200],
+        tag: data.tag || ('maishas-push-' + Date.now()),
+        renotify: true,
+        requireInteraction: true,
+        data: {
+            url: data.url || '/',
+            pkpass_url: data.pkpass_url || '',
+            serial: data.serial || ''
+        },
+        actions: [
+            { action: 'open_card', title: '📲 Ver Tarjeta en Vivo' },
+            { action: 'update_pkpass', title: '🔄 Actualizar Wallet' }
+        ]
     };
-    event.waitUntil(self.registration.showNotification(data.title, options));
+    if (data.image) {
+        options.image = data.image;
+    }
+    event.waitUntil(
+        Promise.all([
+            self.registration.showNotification(data.title, options),
+            self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+                for (let client of windowClients) {
+                    client.postMessage({ type: 'MAISHAS_PUSH', data: data });
+                }
+            })
+        ])
+    );
 });
 
 self.addEventListener('notificationclick', event => {
     event.notification.close();
-    const targetUrl = (event.notification.data && event.notification.data.url) ? event.notification.data.url : '/';
+    const notifData = event.notification.data || {};
+    let targetUrl = notifData.url || '/';
+    if (event.action === 'update_pkpass' && notifData.serial) {
+        targetUrl = '/card/' + notifData.serial + '?auto_pkpass=1&t=' + Date.now();
+    }
     event.waitUntil(
         clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
-            for (let client of windowClients) {
-                if (client.url.includes(targetUrl) && 'focus' in client) return client.focus();
+            if (event.action !== 'update_pkpass') {
+                for (let client of windowClients) {
+                    if (notifData.serial && client.url.includes('/card/' + notifData.serial) && 'focus' in client) {
+                        client.postMessage({ type: 'MAISHAS_PUSH', data: notifData });
+                        return client.focus();
+                    }
+                }
             }
             if (clients.openWindow) return clients.openWindow(targetUrl);
         })
     );
 });
 """
-    return Response(sw_code.strip(), mimetype="application/javascript")
+    resp = Response(sw_code.strip(), mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/api/android/heartbeat/<serial_number>", methods=["POST"])
@@ -3751,7 +3870,7 @@ def android_heartbeat(serial_number):
 @app.route("/api/android/subscribe/<serial_number>", methods=["POST"])
 def android_subscribe(serial_number):
     serial_clean = (serial_number or "").strip().upper()
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(force=True, silent=True) or {}
     sub = payload.get("subscription") or {}
     endpoint = sub.get("endpoint")
     if not endpoint:
@@ -3764,8 +3883,12 @@ def android_subscribe(serial_number):
         (serial_clean, endpoint, json.dumps(sub), get_utc_timestamp())
     )
     c.execute(
-        "UPDATE clients SET android_active = 1, last_sync_at = ? WHERE UPPER(serial) = ?",
-        (get_short_time(), serial_clean)
+        "UPDATE clients SET android_active = 1, last_sync_at = ?, last_push_status = ? WHERE UPPER(serial) = ?",
+        (get_short_time(), f"✅ Push Android activado ({get_short_time()})", serial_clean)
+    )
+    c.execute(
+        "INSERT INTO wallet_logs (created_at, log_text) VALUES (?, ?)",
+        (get_utc_timestamp(), f"🔔 Suscripción Web Push Android registrada para {serial_clean}")
     )
     conn.commit()
     conn.close()
@@ -3996,7 +4119,7 @@ def send_message():
 
 def is_authorized():
     auth = request.headers.get("Authorization", "").strip()
-    return auth in (
+    return (AUTH_TOKEN in auth) or auth in (
         f"ApplePass {AUTH_TOKEN}",
         f"AndroidPass {AUTH_TOKEN}",
         f"AttidoPass {AUTH_TOKEN}",
@@ -4007,36 +4130,49 @@ def is_authorized():
 def register_device(device_id, pass_type_id, serial_number):
     if not is_authorized():
         return "", 401
-    push_token = (request.get_json(silent=True) or {}).get("pushToken")
+    payload = request.get_json(force=True, silent=True) or {}
+    push_token = (payload.get("pushToken") or payload.get("push_token") or "").strip()
+    push_service_url = (payload.get("pushServiceUrl") or payload.get("push_service_url") or "").strip()
     if not push_token:
         return "", 400
 
+    serial_clean = (serial_number or "").strip().upper()
     auth_hdr = request.headers.get("Authorization", "")
     ua_hdr = (request.headers.get("User-Agent") or "").lower()
-    is_android_wallet_app = auth_hdr.startswith("AndroidPass") or auth_hdr.startswith("AttidoPass") or "android" in ua_hdr or "walletpasses" in ua_hdr
+    is_android_wallet_app = (
+        auth_hdr.startswith("AndroidPass")
+        or auth_hdr.startswith("AttidoPass")
+        or "android" in ua_hdr
+        or "walletpasses" in ua_hdr
+        or bool(push_service_url)
+    )
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT 1 FROM registrations WHERE device_id = ? AND serial = ?", (device_id, serial_number))
+    c.execute("SELECT 1 FROM registrations WHERE device_id = ? AND UPPER(serial) = ?", (device_id, serial_clean))
     exists = c.fetchone()
     c.execute(
-        "INSERT OR REPLACE INTO registrations (device_id, push_token, serial) VALUES (?, ?, ?)",
-        (device_id, push_token, serial_number)
+        "INSERT OR REPLACE INTO registrations (device_id, push_token, serial, push_service_url) VALUES (?, ?, ?, ?)",
+        (device_id, push_token, serial_clean, push_service_url)
     )
     if is_android_wallet_app:
         c.execute(
-            "UPDATE clients SET push_token = ?, android_active = 1, last_sync_at = ? WHERE serial = ?",
-            (push_token, get_short_time(), serial_number)
+            "UPDATE clients SET push_token = ?, android_active = 1, last_sync_at = ? WHERE UPPER(serial) = ?",
+            (push_token, get_short_time(), serial_clean)
         )
     else:
         c.execute(
-            "UPDATE clients SET push_token = ?, last_sync_at = ? WHERE serial = ?",
-            (push_token, get_short_time(), serial_number)
+            "UPDATE clients SET push_token = ?, last_sync_at = ? WHERE UPPER(serial) = ?",
+            (push_token, get_short_time(), serial_clean)
         )
+    c.execute(
+        "INSERT INTO wallet_logs (created_at, log_text) VALUES (?, ?)",
+        (get_utc_timestamp(), f"📲 Registro PassKit ({'Android' if is_android_wallet_app else 'iPhone'}): serial={serial_clean} device={device_id[:10]}")
+    )
     conn.commit()
     conn.close()
 
-    print(f"📲 Wallet registrado ({'Android' if is_android_wallet_app else 'iPhone'}): device={device_id} serial={serial_number}")
+    print(f"📲 Wallet registrado ({'Android' if is_android_wallet_app else 'iPhone'}): device={device_id} serial={serial_clean}")
     return "", (200 if exists else 201)
 
 
@@ -4044,11 +4180,12 @@ def register_device(device_id, pass_type_id, serial_number):
 def unregister_device(device_id, pass_type_id, serial_number):
     if not is_authorized():
         return "", 401
+    serial_clean = (serial_number or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM registrations WHERE device_id = ? AND serial = ?", (device_id, serial_number))
+    conn.execute("DELETE FROM registrations WHERE device_id = ? AND UPPER(serial) = ?", (device_id, serial_clean))
     conn.execute(
-        "UPDATE clients SET push_token = NULL WHERE serial = ? AND serial NOT IN (SELECT serial FROM registrations)",
-        (serial_number,)
+        "UPDATE clients SET push_token = NULL WHERE UPPER(serial) = ? AND UPPER(serial) NOT IN (SELECT UPPER(serial) FROM registrations)",
+        (serial_clean,)
     )
     conn.commit()
     conn.close()
@@ -4061,7 +4198,7 @@ def get_updated_passes(device_id, pass_type_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     query = """SELECT c.serial, c.updated_at FROM clients c
-               JOIN registrations r ON r.serial = c.serial
+               JOIN registrations r ON UPPER(r.serial) = UPPER(c.serial)
                WHERE r.device_id = ?"""
     params = [device_id]
     if since:
@@ -4083,18 +4220,19 @@ def get_updated_passes(device_id, pass_type_id):
 def get_latest_pass(pass_type_id, serial_number):
     if not is_authorized():
         return "", 401
+    serial_clean = (serial_number or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at, last_action FROM clients WHERE serial = ?",
-        (serial_number,)
+        "SELECT serial, name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at, last_action FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
     )
     client = c.fetchone()
     if not client:
         conn.close()
         return "", 404
 
-    name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at_str, last_action = client
+    serial_id, name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at_str, last_action = client
 
     try:
         dt_upd = datetime.strptime(updated_at_str, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
@@ -4115,16 +4253,20 @@ def get_latest_pass(pass_type_id, serial_number):
         except Exception:
             pass
 
-    c.execute("UPDATE clients SET last_sync_at = ? WHERE serial = ?", (get_short_time(), serial_number))
-    conn.commit()
-    conn.close()
-
     auth_hdr = request.headers.get("Authorization", "")
     ua_hdr = (request.headers.get("User-Agent") or "").lower()
     is_android_wallet = auth_hdr.startswith("AndroidPass") or auth_hdr.startswith("AttidoPass") or "android" in ua_hdr or "walletpasses" in ua_hdr
 
+    c.execute("UPDATE clients SET last_sync_at = ? WHERE serial = ?", (get_short_time(), serial_id))
+    c.execute(
+        "INSERT INTO wallet_logs (created_at, log_text) VALUES (?, ?)",
+        (get_utc_timestamp(), f"🔄 Pase descargado/actualizado ({'Android' if is_android_wallet else 'iPhone'}): {serial_id} ({stamps}/10)")
+    )
+    conn.commit()
+    conn.close()
+
     pkpass_path = generate_signed_pkpass(
-        serial_number, name, stamps or 0, request.host_url, message,
+        serial_id, name, stamps or 0, request.host_url, message,
         phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0,
         last_action=last_action or "add",
         for_android=is_android_wallet
@@ -4137,7 +4279,7 @@ def get_latest_pass(pass_type_id, serial_number):
 
 @app.route("/v1/log", methods=["POST"])
 def wallet_log():
-    logs = (request.get_json(silent=True) or {}).get("logs", [])
+    logs = (request.get_json(force=True, silent=True) or {}).get("logs", [])
     if logs:
         conn = sqlite3.connect(DB_PATH)
         for line in logs:
@@ -4148,13 +4290,18 @@ def wallet_log():
     return "", 200
 
 
-def send_android_webpush(sub_dict, serial, body_text):
-    """Envía notificación Web Push RFC 8291 (VAPID) a un teléfono Android."""
+def send_android_webpush(sub_dict, serial, body_text, stamps=None):
+    """Envía notificación Web Push RFC 8291 (VAPID) a un teléfono Android con imagen en vivo del pase."""
     try:
+        ts_val = int(datetime.now(timezone.utc).timestamp())
+        title_str = f"Maishas Café ☕️ ({stamps}/10 sellos)" if stamps is not None else "Maishas Café ☕️"
         payload = json.dumps({
-            "title": "Maishas Café ☕️",
+            "title": title_str,
             "body": body_text,
-            "url": f"/card/{serial}",
+            "url": f"/card/{serial}?from_push=1&t={ts_val}",
+            "pkpass_url": f"/card/{serial}/download.pkpass?v={ts_val}",
+            "image": f"/card/{serial}/strip.png?v={ts_val}",
+            "tag": f"maishas-{serial}-{ts_val}",
             "serial": serial
         })
         webpush(
@@ -4174,67 +4321,85 @@ def send_android_webpush(sub_dict, serial, body_text):
 
 def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Café se ha actualizado ☕️"):
     """Despacha notificaciones Push a iPhone y Android y devuelve un estado claro en hora local de Navojoa, Sonora."""
+    serial_clean = (serial or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    raw_tokens = [r[0] for r in c.execute("SELECT push_token FROM registrations WHERE serial = ? AND push_token IS NOT NULL", (serial,)).fetchall()]
-    client_row = c.execute("SELECT push_token, android_active FROM clients WHERE serial = ?", (serial,)).fetchone()
-    if client_row and client_row[0]:
-        raw_tokens.append(client_row[0])
-    reg_tokens = list(dict.fromkeys(t for t in raw_tokens if t))
-    android_active = bool(client_row[1]) if client_row else False
+    reg_rows = c.execute(
+        "SELECT push_token, COALESCE(push_service_url, '') FROM registrations WHERE UPPER(serial) = ? AND push_token IS NOT NULL",
+        (serial_clean,)
+    ).fetchall()
+    client_row = c.execute(
+        "SELECT push_token, android_active, stamps FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    ).fetchone()
 
-    android_subs = c.execute("SELECT endpoint, sub_json FROM android_subscriptions WHERE serial = ?", (serial,)).fetchall()
+    token_map = {}
+    for tok, srv_url in reg_rows:
+        if tok:
+            token_map[tok] = srv_url
+    if client_row and client_row[0] and client_row[0] not in token_map:
+        token_map[client_row[0]] = ""
+
+    android_active = bool(client_row[1]) if client_row else False
+    current_stamps = (client_row[2] or 0) if client_row else 0
+
+    android_subs = c.execute(
+        "SELECT endpoint, sub_json FROM android_subscriptions WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    ).fetchall()
 
     any_success = False
     any_error = False
 
-    # 1. Enviar a iPhones registrados (Apple APNs HTTP/2) o Apps Android .pkpass (WalletPasses)
-    for token in reg_tokens:
-        ok, status_code, detail = send_apns_push(token)
+    # 1. Enviar a iPhones registrados (Apple APNs HTTP/2) o Apps Android .pkpass (WalletPasses / Attido)
+    for token, srv_url in token_map.items():
+        ok, status_code, detail = send_apns_push(token, push_service_url=srv_url)
         if ok:
             any_success = True
         else:
             any_error = True
             if status_code == 410 or "Unregistered" in detail or "BadDeviceToken" in detail:
-                c.execute("DELETE FROM registrations WHERE push_token = ? AND serial = ?", (token, serial))
+                c.execute("DELETE FROM registrations WHERE push_token = ? AND UPPER(serial) = ?", (token, serial_clean))
 
-    # 2. Enviar a suscripciones Web Push de Android
+    # 2. Enviar a suscripciones Web Push de Android (Chrome / PWA)
     for endpoint, sub_json_str in android_subs:
         try:
             sub_dict = json.loads(sub_json_str)
-            ok_and, code_and, _ = send_android_webpush(sub_dict, serial, notification_body)
+            ok_and, code_and, _ = send_android_webpush(sub_dict, serial_clean, notification_body, stamps=current_stamps)
             if ok_and:
                 any_success = True
-            elif code_and in (404, 410):
-                c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
+            else:
+                any_error = True
+                if code_and in (404, 410):
+                    c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
         except Exception:
-            pass
-
-    if android_active:
-        any_success = True
+            any_error = True
 
     sonora_now = get_short_time()
     if any_success:
         status_msg = f"✅ Notificación enviada ({sonora_now})"
+    elif android_active:
+        status_msg = f"🔄 Tarjeta web al día ({sonora_now}) · Falta activar Push en su Android"
     elif any_error:
         status_msg = f"⚠️ No se pudo notificar ({sonora_now})"
     else:
         status_msg = "⏳ Aún no instala su tarjeta"
 
-    c.execute("UPDATE clients SET last_push_status = ? WHERE serial = ?", (status_msg, serial))
+    c.execute("UPDATE clients SET last_push_status = ? WHERE UPPER(serial) = ?", (status_msg, serial_clean))
     conn.commit()
     conn.close()
     return status_msg
 
 
-def send_apns_push(push_token):
+def send_apns_push(push_token, push_service_url=None):
     try:
         # Detectar si el token pertenece a una app Android de .pkpass (ej. WalletPasses FCM token) vs iOS APNs hex token
         is_ios_hex = len(push_token) in (64, 128) and all(c in "0123456789abcdefABCDEF" for c in push_token)
         if not is_ios_hex:
+            target_url = push_service_url if (push_service_url and push_service_url.startswith("http")) else "https://walletpasses.appspot.com/api/v1/push"
             with httpx.Client(timeout=8.0) as client:
                 res = client.post(
-                    "https://walletpasses.appspot.com/api/v1/push",
+                    target_url,
                     json={"passTypeIdentifier": PASS_TYPE_ID, "pushTokens": [push_token]}
                 )
                 if res.status_code in (200, 201, 202, 204):
