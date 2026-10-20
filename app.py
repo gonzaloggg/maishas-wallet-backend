@@ -1215,15 +1215,15 @@ ANDROID_CARD_HTML = """
             🔔 <strong>Importante en Android:</strong> Al tocar el botón dorado selecciona <strong>«Permitir notificaciones»</strong> para que tus sellos y avisos te lleguen al instante.
         </div>
 
-        <button type="button"
-                id="btn-save-wallet-top"
-                class="btn-action-gold"
-                onclick="saveAndActivateAndroidWallet()">
+        <a href="/card/{{ client.serial }}/download.pkpass?v={{ client.updated_at | urlencode }}"
+           id="btn-save-wallet-top"
+           class="btn-action-gold"
+           onclick="onSaveToWalletClick()">
             <span id="btn-save-wallet-label">📲 Activar Alertas y Guardar en Wallet ({{ client.stamps }}/10)</span>
-        </button>
+        </a>
 
         <div id="wallet-download-hint" class="wallet-step-hint">
-            ✅ <strong>Pase {{ client.serial }} actualizado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para actualizarlo en tu <strong>Billetera de Google</strong>, o usa esta <strong>Tarjeta en Vivo</strong> aquí abajo que se actualiza sola automáticamente.
+            ✅ <strong>Pase {{ client.serial }} descargado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para guardarlo en tu <strong>Billetera</strong>, y toca <strong>«Permitir»</strong> si tu celular te pregunta por las notificaciones.
         </div>
 
         <div class="wallet-sub-links">
@@ -1340,24 +1340,19 @@ ANDROID_CARD_HTML = """
         let currentMessage = {{ client.message | tojson }};
         let currentTier = {{ client.tier.name | tojson }};
         let showingBack = false;
-        let autoPushAttempted = false;
 
-        function triggerPkpassDownload() {
+        function onSaveToWalletClick() {
             const hint = document.getElementById('wallet-download-hint');
             if (hint) hint.style.display = 'block';
-            showLiveBanner('📲 Descargando pase ' + SERIAL + ' (' + currentStamps + '/10 sellos). Toca "Abrir" para guardarlo en tu Billetera.');
-            window.location.href = `/card/${SERIAL}/download.pkpass?v=${Date.now()}`;
+            showLiveBanner('📲 Pase ' + SERIAL + ' (' + currentStamps + '/10) descargado. Toca "Abrir" arriba para guardarlo en Wallet.');
+            try {
+                enableAndroidPush(true);
+            } catch (e) {}
         }
 
-        async function saveAndActivateAndroidWallet() {
-            try {
-                if ('Notification' in window && Notification.permission !== 'granted') {
-                    await enableAndroidPush(true);
-                } else {
-                    enableAndroidPush(true);
-                }
-            } catch (e) {}
-            triggerPkpassDownload();
+        function triggerPkpassDownload() {
+            onSaveToWalletClick();
+            window.location.href = `/card/${SERIAL}/download.pkpass?v=${Date.now()}`;
         }
 
         function toggleBackView() {
@@ -1412,6 +1407,10 @@ ANDROID_CARD_HTML = """
                     document.getElementById('back-val-history').textContent = data.history_text;
                     document.getElementById('card-strip-img').src = `/card/${SERIAL}/strip.png?v=${encodeURIComponent(data.updated_at)}`;
 
+                    const saveBtn = document.getElementById('btn-save-wallet-top');
+                    if (saveBtn) {
+                        saveBtn.href = `/card/${SERIAL}/download.pkpass?v=${encodeURIComponent(data.updated_at)}`;
+                    }
                     const saveLbl = document.getElementById('btn-save-wallet-label');
                     if (saveLbl) {
                         saveLbl.textContent = `🔄 Actualizar mi pase en Billetera (${data.stamps}/10 sellos)`;
@@ -1524,18 +1523,8 @@ ANDROID_CARD_HTML = """
         }
 
         // Si ya dio permiso antes, registrar y sincronizar Service Worker automáticamente al abrir
-        if ('serviceWorker' in navigator && 'Notification' in window) {
-            if (Notification.permission === 'granted') {
-                enableAndroidPush(true);
-            } else if (Notification.permission === 'default') {
-                // Al primer toque en cualquier parte de la tarjeta, solicitar permiso Push automáticamente
-                document.addEventListener('click', function onFirstCardTap() {
-                    if (!autoPushAttempted && Notification.permission === 'default') {
-                        autoPushAttempted = true;
-                        enableAndroidPush(true);
-                    }
-                }, { once: true });
-            }
+        if ('serviceWorker' in navigator && 'Notification' in window && Notification.permission === 'granted') {
+            enableAndroidPush(true);
         }
 
         // Si viene desde el botón de actualizar de una notificación Push, descargar el .pkpass actualizado
@@ -1564,7 +1553,7 @@ ANDROID_CARD_HTML = """
                 await deferredPrompt.userChoice;
                 deferredPrompt = null;
             } else {
-                alert('📲 Para fijar tu Tarjeta Automática en tu inicio de Android:\n\n1. Toca los 3 puntos (⋮) arriba a la derecha en Chrome.\n2. Selecciona «Agregar a la pantalla principal» o «Instalar aplicación».\n\n¡Así abrirás tu tarjeta con 1 toque y tus sellos siempre estarán actualizados en vivo!');
+                alert('📲 Para fijar tu Tarjeta Automática en tu inicio de Android: 1) Toca los 3 puntos (⋮) arriba a la derecha en Chrome. 2) Selecciona «Agregar a la pantalla principal» o «Instalar aplicación». ¡Así tus sellos siempre estarán actualizados en vivo!');
             }
         }
     </script>
