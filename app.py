@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify, send_file, render_template_string, redirect, url_for, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from email.utils import formatdate, parsedate_to_datetime
-from PIL import Image, ImageDraw
-import os, io, json, base64, hashlib, zipfile, subprocess, uuid, httpx, ssl, sqlite3, tempfile, shutil, math
+from PIL import Image, ImageDraw, ImageFont
+import os, io, csv, re, json, base64, hashlib, zipfile, subprocess, uuid, httpx, ssl, sqlite3, tempfile, shutil, math
 import qrcode
 from py_vapid import Vapid01
 from pywebpush import webpush, WebPushException
@@ -61,11 +61,13 @@ for env_var, file_path in [("ENV_KEY_PEM", KEY_PEM), ("ENV_CERT_PEM", CERT_PEM),
 
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "MaishasSecretAuthToken2026")
 PASS_TYPE_ID = "pass.com.maishascafe.loyalty"
-DEFAULT_MESSAGE = "¡Bienvenido a Maishas Café! Aquí verás nuestras promociones."
-DEFAULT_LAT = 24.8049
-DEFAULT_LNG = -107.3940
+DEFAULT_MESSAGE = "¡Bienvenido a Maishas Café! ☕️"
+DEFAULT_LAT = 27.0706
+DEFAULT_LNG = -109.4437
 DEFAULT_GEO_TEXT = "☕️ ¡Estás cerca de Maishas Café! Pasa por tu café favorito y suma tu sello de hoy ✨"
 
+# Zona horaria de Navojoa, Sonora (America/Hermosillo: UTC-7 fijo todo el año)
+SONORA_TZ = timezone(timedelta(hours=-7))
 MESES_ES = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 
@@ -98,13 +100,61 @@ VAPID_PRIVATE_PEM, VAPID_PUBLIC_KEY = init_vapid_keys()
 
 
 def get_utc_timestamp():
-    """Retorna timestamp UTC con precisión de microsegundos compatible con SQLite."""
+    """Retorna timestamp UTC con precisión de microsegundos compatible con SQLite e iOS PassKit."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def get_short_time():
-    """Retorna hora legible UTC para mostrar en el panel."""
-    return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    """Retorna la hora local de Navojoa, Sonora (UTC-7) en formato sencillo de 12 horas para el barista."""
+    return datetime.now(SONORA_TZ).strftime("%I:%M %p").lstrip("0")
+
+
+def get_sonora_datetime_str():
+    """Retorna fecha y hora local de Navojoa, Sonora (UTC-7) para registro de alta y reportes."""
+    now_s = datetime.now(SONORA_TZ)
+    return f"{now_s.day:02d}/{MESES_ES[now_s.month]}/{now_s.year} {now_s.strftime('%I:%M %p').lstrip('0')}"
+
+
+def format_sonora_time(raw_val):
+    """Convierte cualquier hora UTC antigua o timestamp a hora local amigable de Navojoa, Sonora."""
+    if not raw_val:
+        return ""
+    s = str(raw_val).strip()
+    # Si es un timestamp completo UTC (YYYY-MM-DD HH:MM:SS...)
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt_utc = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            dt_son = dt_utc.astimezone(SONORA_TZ)
+            return f"{dt_son.day:02d}/{MESES_ES[dt_son.month]}/{dt_son.year} {dt_son.strftime('%I:%M %p').lstrip('0')}"
+        except Exception:
+            pass
+    # Si contiene una hora corta en UTC del tipo '04:28:11 UTC'
+    m = re.search(r"(\d{2}):(\d{2})(?::\d{2})?\s*UTC", s)
+    if m:
+        hh_utc, mm_utc = int(m.group(1)), int(m.group(2))
+        hh_son = (hh_utc - 7) % 24
+        ampm = "AM" if hh_son < 12 else "PM"
+        hh_12 = hh_son % 12 or 12
+        return f"{hh_12}:{mm_utc:02d} {ampm}"
+    return s
+
+
+def humanize_push_status(raw_status):
+    """Traduce estados técnicos (como '200 OK' o 'UTC') a lenguaje claro para el barista en hora de Sonora."""
+    if not raw_status:
+        return ""
+    s = str(raw_status).strip()
+    t_son = format_sonora_time(s)
+    # Extraer hora amigable si existe entre paréntesis
+    m_par = re.search(r"\(([^)]+)\)", s)
+    time_part = format_sonora_time(m_par.group(1)) if m_par else t_son
+    if "200 OK" in s or "Notificación enviada" in s or "Live Sync" in s or "actualizada" in s:
+        if time_part and time_part != s:
+            return f"✅ Notificación enviada ({time_part})"
+        return "✅ Notificación enviada"
+    if "Error" in s:
+        return f"⚠️ No se pudo notificar ({time_part})" if time_part else "⚠️ No se pudo notificar"
+    return s
 
 
 def get_vip_tier(total_visits):
@@ -114,6 +164,7 @@ def get_vip_tier(total_visits):
         return {
             "key": "gold",
             "name": "Socio Oro VIP ♛",
+            "short": "Oro VIP ♛",
             "badge": "♛ Oro VIP",
             "bg": "linear-gradient(135deg, #D4AF37 0%, #F3E5AB 50%, #AA7C11 100%)",
             "fg": "#12100E",
@@ -124,6 +175,7 @@ def get_vip_tier(total_visits):
         return {
             "key": "silver",
             "name": "Socio Plata ✦",
+            "short": "Plata ✦",
             "badge": "✦ Plata",
             "bg": "linear-gradient(135deg, #E0E5EC 0%, #B8C2CC 50%, #8A95A5 100%)",
             "fg": "#12100E",
@@ -134,6 +186,7 @@ def get_vip_tier(total_visits):
         return {
             "key": "bronze",
             "name": "Amante del Café ☕️",
+            "short": "Bronce ☕️",
             "badge": "🌱 Bronce",
             "bg": "rgba(198, 166, 117, 0.16)",
             "fg": "#E6C280",
@@ -145,7 +198,7 @@ def get_vip_tier(total_visits):
 def calculate_birthday_info(birthdate_str, ref_date=None):
     """
     Analiza la fecha de nacimiento (YYYY-MM-DD) e identifica si el cliente cumple años
-    HOY, en los próximos 7 días o en el mes actual (manejando cambios de año y años bisiestos).
+    HOY, en los próximos 7 días o en el mes actual (usando fecha local de Navojoa, Sonora).
     """
     empty_res = {
         "has_birthdate": False,
@@ -177,7 +230,7 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
     except Exception:
         return empty_res
 
-    today = ref_date or datetime.now().date()
+    today = ref_date or datetime.now(SONORA_TZ).date()
 
     def _safe_date(yr, m, d):
         try:
@@ -217,9 +270,18 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
     }
 
 
-def _create_dynamic_strip_pil(stamps_count):
+def _clean_text_for_pil(text):
+    """Limpia emojis fuera de Latin-1 para renderizado nítido con la fuente TrueType de Pillow."""
+    if not text:
+        return ""
+    cleaned = "".join(ch for ch in text if 32 <= ord(ch) <= 255)
+    return " ".join(cleaned.split()).strip()
+
+
+def _create_dynamic_strip_pil(stamps_count, message=None):
     """
-    Crea el objeto PIL Image (1500x500 super-sampled) de la matriz Luxury Coffee de 10 sellos.
+    Crea el objeto PIL Image (1500x500 super-sampled) de la matriz Luxury Coffee de 10 sellos
+    e incluye una barra inferior de alta legibilidad con el AVISO / estado del cliente.
     """
     stamps = max(0, min(10, int(stamps_count or 0)))
     W, H = 1500, 500
@@ -241,12 +303,12 @@ def _create_dynamic_strip_pil(stamps_count):
 
     border_col = (212, 175, 55) if stamps >= 10 else (82, 68, 50)
     inner_border_col = (145, 118, 68) if stamps >= 10 else (50, 42, 33)
-    draw.rounded_rectangle([24, 20, W - 25, H - 21], radius=36, outline=border_col, width=4)
-    draw.rounded_rectangle([36, 32, W - 37, H - 33], radius=28, outline=inner_border_col, width=2)
+    draw.rounded_rectangle([24, 18, W - 25, H - 19], radius=36, outline=border_col, width=4)
+    draw.rounded_rectangle([36, 30, W - 37, H - 31], radius=28, outline=inner_border_col, width=2)
 
     cols_x = [230, 490, 750, 1010, 1270]
-    rows_y = [152, 348]
-    radius = 68
+    rows_y = [125, 282]
+    radius = 58
 
     for idx in range(10):
         row = idx // 5
@@ -257,7 +319,7 @@ def _create_dynamic_strip_pil(stamps_count):
         is_tenth = (idx == 9)
 
         if is_earned:
-            halo_r = radius + 12
+            halo_r = radius + 10
             draw.ellipse(
                 [cx - halo_r, cy - halo_r, cx + halo_r, cy + halo_r],
                 fill=(48, 39, 24),
@@ -272,7 +334,7 @@ def _create_dynamic_strip_pil(stamps_count):
                 outline=rim_gold,
                 width=5
             )
-            in_r = radius - 14
+            in_r = radius - 12
             draw.ellipse(
                 [cx - in_r, cy - in_r, cx + in_r, cy + in_r],
                 outline=(150, 118, 30),
@@ -283,18 +345,18 @@ def _create_dynamic_strip_pil(stamps_count):
                 pts = []
                 for i in range(10):
                     ang = -math.pi / 2 + i * (math.pi / 5)
-                    rad_p = 30 if i % 2 == 0 else 13
+                    rad_p = 26 if i % 2 == 0 else 11
                     pts.append((cx + rad_p * math.cos(ang), cy + rad_p * math.sin(ang)))
                 draw.polygon(pts, fill=(22, 18, 15))
             else:
-                bean_rx, bean_ry = 20, 27
+                bean_rx, bean_ry = 17, 23
                 draw.ellipse(
                     [cx - bean_rx, cy - bean_ry, cx + bean_rx, cy + bean_ry],
                     fill=(24, 20, 16)
                 )
                 draw.arc(
-                    [cx - 14, cy - bean_ry + 3, cx + 18, cy + bean_ry - 3],
-                    start=110, end=250, fill=fill_gold, width=5
+                    [cx - 12, cy - bean_ry + 3, cx + 15, cy + bean_ry - 3],
+                    start=110, end=250, fill=fill_gold, width=4
                 )
         else:
             bg_pending = (22, 19, 16)
@@ -306,7 +368,7 @@ def _create_dynamic_strip_pil(stamps_count):
                 outline=ring_color,
                 width=ring_width
             )
-            in_r = radius - 15
+            in_r = radius - 13
             draw.ellipse(
                 [cx - in_r, cy - in_r, cx + in_r, cy + in_r],
                 outline=(52, 44, 35) if not is_tenth else (110, 90, 58),
@@ -317,23 +379,52 @@ def _create_dynamic_strip_pil(stamps_count):
                 pts = []
                 for i in range(10):
                     ang = -math.pi / 2 + i * (math.pi / 5)
-                    rad_p = 24 if i % 2 == 0 else 10
+                    rad_p = 21 if i % 2 == 0 else 9
                     pts.append((cx + rad_p * math.cos(ang), cy + rad_p * math.sin(ang)))
                 draw.polygon(pts, outline=(158, 130, 84), fill=(42, 35, 26))
             else:
-                dot_r = 8
+                dot_r = 7
                 draw.ellipse(
                     [cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r],
                     fill=(66, 56, 44)
                 )
+
+    # Barra inferior de alta legibilidad dentro del strip para que el AVISO siempre se lea completo
+    raw_msg = _clean_text_for_pil((message or DEFAULT_MESSAGE).replace("\u200b", ""))
+    if not raw_msg:
+        raw_msg = "Bienvenido a Maishas Cafe"
+    reward_txt = "¡CAFE GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Cafe Gratis"
+    banner_text = f"{reward_txt}  •  AVISO: {raw_msg}"
+    if len(banner_text) > 88:
+        banner_text = banner_text[:85] + "..."
+
+    draw.rounded_rectangle(
+        [64, 382, W - 64, 452],
+        radius=22,
+        fill=(26, 22, 18),
+        outline=(128, 104, 62),
+        width=2
+    )
+    try:
+        font_banner = ImageFont.load_default(size=26)
+    except TypeError:
+        font_banner = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), banner_text, font=font_banner)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    tx = max(80, (W - tw) // 2)
+    ty = 382 + (70 - th) // 2 - 3
+    draw.text((tx, ty), banner_text, fill=(238, 212, 152), font=font_banner)
+
     return img
 
 
-def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
+def render_dynamic_strip(stamps_count, output_dir, total_visits=0, message=None):
     """
     Guarda strip.png (375x125) y strip@2x.png (750x250) para Apple Wallet .pkpass.
     """
-    img = _create_dynamic_strip_pil(stamps_count)
+    img = _create_dynamic_strip_pil(stamps_count, message=message)
     img_2x = img.resize((750, 250), Image.Resampling.LANCZOS)
     img_1x = img.resize((375, 125), Image.Resampling.LANCZOS)
     img_2x.save(os.path.join(output_dir, "strip@2x.png"), format="PNG", optimize=True)
@@ -360,7 +451,9 @@ def init_db():
             last_push_status TEXT,
             last_sync_at TEXT,
             platform TEXT DEFAULT 'ios',
-            android_active INTEGER DEFAULT 0
+            android_active INTEGER DEFAULT 0,
+            created_at TEXT,
+            last_action TEXT DEFAULT 'add'
         )
     ''')
     cols = [r[1] for r in c.execute("PRAGMA table_info(clients)")]
@@ -374,6 +467,8 @@ def init_db():
         ("redeemed_count", "ALTER TABLE clients ADD COLUMN redeemed_count INTEGER DEFAULT 0"),
         ("platform", "ALTER TABLE clients ADD COLUMN platform TEXT DEFAULT 'ios'"),
         ("android_active", "ALTER TABLE clients ADD COLUMN android_active INTEGER DEFAULT 0"),
+        ("created_at", "ALTER TABLE clients ADD COLUMN created_at TEXT"),
+        ("last_action", "ALTER TABLE clients ADD COLUMN last_action TEXT DEFAULT 'add'"),
     ]
     for col_name, sql in migrations:
         if col_name not in cols:
@@ -382,7 +477,13 @@ def init_db():
     c.execute("UPDATE clients SET total_visits = COALESCE(stamps, 0) WHERE total_visits IS NULL OR (total_visits = 0 AND stamps > 0)")
     c.execute("UPDATE clients SET redeemed_count = 0 WHERE redeemed_count IS NULL")
     c.execute("UPDATE clients SET android_active = 0 WHERE android_active IS NULL")
+    c.execute("UPDATE clients SET last_action = 'add' WHERE last_action IS NULL OR last_action = ''")
     c.execute("UPDATE clients SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (get_utc_timestamp(),))
+    c.execute("UPDATE clients SET created_at = ? WHERE created_at IS NULL OR created_at = ''", (get_sonora_datetime_str(),))
+    c.execute(
+        "UPDATE clients SET message = ? WHERE message = '¡Bienvenido a Maishas Café! Aquí verás nuestras promociones.'",
+        (DEFAULT_MESSAGE,)
+    )
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS registrations (
@@ -1881,6 +1982,214 @@ BARISTA_HTML = """
         }
         .btn-icon-sec:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
         .btn-icon-del:hover { background: rgba(255, 55, 95, 0.2); border-color: rgba(255, 55, 95, 0.45); color: #FF6B88; }
+
+        /* Navegación Principal Superior (Mostrador POS vs Base de Datos) */
+        .main-nav-tabs {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .nav-tab-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            padding: 9px 15px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            transition: all 0.2s ease;
+            text-decoration: none;
+        }
+        .nav-tab-btn:hover {
+            color: var(--text-primary);
+            border-color: rgba(212, 175, 55, 0.35);
+        }
+        .nav-tab-btn.active {
+            background: rgba(212, 175, 55, 0.18);
+            border-color: rgba(212, 175, 55, 0.5);
+            color: var(--gold-light);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        }
+        .btn-export-csv {
+            background: linear-gradient(135deg, #30D158 0%, #229E42 100%);
+            color: #08130B;
+            border: 1px solid #98F7AE;
+            padding: 9px 15px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 800;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            text-decoration: none;
+            box-shadow: 0 4px 14px rgba(48, 209, 88, 0.25);
+        }
+
+        /* Vista de Tabla Ejecutiva / Base de Datos de Clientes */
+        .db-view-section {
+            display: none;
+        }
+        .db-header-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 20px 22px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 14px;
+        }
+        .db-table-wrap {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            overflow-x: auto;
+            box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+        }
+        .db-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            text-align: left;
+            min-width: 980px;
+        }
+        .db-table th {
+            background: rgba(13, 12, 11, 0.85);
+            color: var(--gold-light);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            padding: 14px 16px;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.22);
+            white-space: nowrap;
+        }
+        .db-table td {
+            padding: 13px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            color: var(--text-primary);
+            vertical-align: middle;
+        }
+        .db-table tr:hover td {
+            background: rgba(212, 175, 55, 0.05);
+        }
+
+        /* Modal Personalizado Glassmorphism (Sin URL de navegador) */
+        .custom-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(8, 7, 6, 0.78);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            z-index: 10000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .custom-modal-backdrop.open {
+            display: flex;
+        }
+        .custom-modal-box {
+            width: 100%;
+            max-width: 420px;
+            background: linear-gradient(165deg, #1E1B18 0%, #141210 100%);
+            border: 1px solid rgba(212, 175, 55, 0.35);
+            border-radius: 24px;
+            padding: 26px 24px 22px;
+            box-shadow: 0 28px 70px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+            text-align: center;
+            animation: modalPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes modalPop {
+            from { transform: scale(0.92); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        .cm-icon {
+            width: 56px;
+            height: 56px;
+            border-radius: 18px;
+            margin: 0 auto 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 26px;
+        }
+        .cm-icon.danger {
+            background: rgba(255, 55, 95, 0.16);
+            border: 1px solid rgba(255, 55, 95, 0.4);
+        }
+        .cm-icon.warn {
+            background: rgba(212, 175, 55, 0.16);
+            border: 1px solid rgba(212, 175, 55, 0.45);
+        }
+        .cm-icon.success {
+            background: rgba(48, 209, 88, 0.16);
+            border: 1px solid rgba(48, 209, 88, 0.45);
+        }
+        .cm-brand {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.7px;
+            text-transform: uppercase;
+            color: var(--gold-light);
+            margin-bottom: 4px;
+        }
+        .cm-title {
+            font-size: 19px;
+            font-weight: 800;
+            color: var(--text-primary);
+            margin: 0 0 8px;
+        }
+        .cm-desc {
+            font-size: 13.5px;
+            color: var(--text-secondary);
+            line-height: 1.45;
+            margin: 0 0 22px;
+        }
+        .cm-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .cm-btn-cancel {
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+            padding: 12px 16px;
+            border-radius: 13px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .cm-btn-confirm {
+            border: none;
+            padding: 12px 16px;
+            border-radius: 13px;
+            font-size: 14px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .cm-btn-confirm.danger {
+            background: linear-gradient(135deg, #FF375F 0%, #C81D40 100%);
+            color: #FFFFFF;
+        }
+        .cm-btn-confirm.warn {
+            background: linear-gradient(135deg, #D4AF37 0%, #B38A22 100%);
+            color: #12100E;
+        }
+        .cm-btn-confirm.success {
+            background: linear-gradient(135deg, #30D158 0%, #229E42 100%);
+            color: #08130B;
+        }
     </style>
 </head>
 <body>
@@ -1895,24 +2204,41 @@ BARISTA_HTML = """
     </div>
     {% endif %}
 
+    <!-- MODAL DE CONFIRMACIÓN PERSONALIZADO MAISHAS CAFÉ (Sin alerta del navegador) -->
+    <div class="custom-modal-backdrop" id="maishas-confirm-modal">
+        <div class="custom-modal-box">
+            <div class="cm-icon warn" id="cm-icon-box">⚠️</div>
+            <div class="cm-brand">Maishas Café · Confirmación</div>
+            <h3 class="cm-title" id="cm-title-text">¿Confirmar acción?</h3>
+            <p class="cm-desc" id="cm-desc-text"></p>
+            <div class="cm-actions">
+                <button type="button" class="cm-btn-cancel" onclick="closeConfirmModal()">Cancelar</button>
+                <button type="button" class="cm-btn-confirm warn" id="cm-confirm-btn" onclick="executeConfirmedForm()">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
     <header class="sticky-header">
         <div class="header-inner">
             <div class="brand-Cluster">
                 <div class="brand-emblem">☕️</div>
                 <div>
                     <h1 class="brand-title">Maishas Café</h1>
-                    <span class="brand-sub">iOS & Android POS Console</span>
+                    <span class="brand-sub">Navojoa, Sonora · Consola Barista</span>
                 </div>
             </div>
 
-            <div class="kpi-cluster">
-                <div class="kpi-pill">👥 Clientes <strong>{{ clients|length }}</strong></div>
-                <div class="kpi-pill">📲 Activos (/🤖) <strong>{{ installed_count }}</strong></div>
-                <div class="kpi-pill">🎁 Canjeados <strong>{{ total_redeemed }}</strong></div>
-                <div class="kpi-pill">♛ VIP <strong>{{ gold_count + silver_count }}</strong></div>
-                <div class="kpi-pill kpi-bday" onclick="setFilterTab('bday')" title="Ver cumpleañeros">
-                    🎂 Cumpleaños Semana <strong>{{ upcoming_birthdays|length }}</strong>
-                </div>
+            <!-- Pestañas de Vista Principal (Mostrador vs Base de Datos y Machote Excel) -->
+            <div class="main-nav-tabs">
+                <button type="button" id="nav-btn-pos" class="nav-tab-btn active" onclick="switchMainView('pos')">
+                    ☕️ Mostrador POS
+                </button>
+                <button type="button" id="nav-btn-db" class="nav-tab-btn" onclick="switchMainView('db')">
+                    📊 Base de Datos de Clientes ({{ clients|length }})
+                </button>
+                <a href="/api/export-clients.csv" class="btn-export-csv" title="Descargar machote de clientes en formato Excel (.CSV)">
+                    📥 Descargar Machote Excel
+                </a>
             </div>
 
             <div class="spotlight-wrap">
@@ -1924,6 +2250,8 @@ BARISTA_HTML = """
     </header>
 
     <main class="main-container">
+        <!-- VISTA 1: OPERACIÓN EN MOSTRADOR POS -->
+        <div id="view-pos-container">
         <section class="bento-grid">
 
             <!-- MÓDULO 1: ESCÁNER QR CON HUD ESTILO CÁMARA iOS -->
@@ -1936,7 +2264,7 @@ BARISTA_HTML = """
                             <button type="button" id="seg-auto-off" class="seg-btn" onclick="setAutoScanMode(false)">🔍 Manual</button>
                         </div>
                     </div>
-                    <p class="bento-subtitle">Escanea la tarjeta del cliente (iPhone Apple Wallet o Android Wallet Digital).</p>
+                    <p class="bento-subtitle">Escanea la tarjeta del cliente (iPhone o Android).</p>
 
                     <div class="qr-hud-wrapper" id="qr-hud-box">
                         <div class="scan-flash" id="scan-flash-overlay"></div>
@@ -1971,7 +2299,7 @@ BARISTA_HTML = """
                             Hoy y próx. 7 días
                         </span>
                     </div>
-                    <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su iPhone o Android con 1 clic.</p>
+                    <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su celular con 1 clic.</p>
 
                     <div class="bday-list">
                         {% for bclient in upcoming_birthdays %}
@@ -2034,13 +2362,13 @@ BARISTA_HTML = """
                         </div>
 
                         <form action="/api/send-message" method="POST">
-                            <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="2" placeholder="Escribe una promoción o aviso para iPhone y Android..." required oninput="updateLockScreenPreview(this.value)"></textarea>
+                            <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="2" placeholder="Escribe una promoción o aviso para tus clientes..." required oninput="updateLockScreenPreview(this.value)"></textarea>
 
                             <div class="ios-lockscreen-preview">
                                 <div class="ios-notif-icon">☕️</div>
                                 <div class="ios-notif-body">
                                     <div class="ios-notif-top">
-                                        <span>MAISHAS CAFÉ (iOS & ANDROID)</span>
+                                        <span>MAISHAS CAFÉ</span>
                                         <span>ahora</span>
                                     </div>
                                     <div class="ios-notif-text" id="ios-preview-text">📣 Escribe un mensaje para previsualizar...</div>
@@ -2049,7 +2377,7 @@ BARISTA_HTML = """
 
                             <div style="display:flex; gap:8px; margin-top:8px;">
                                 <select name="target" id="push-target-select" class="input-dark" style="flex:1;">
-                                    <option value="all">📲 Todos ({{ installed_count }} dispositivos activos)</option>
+                                    <option value="all">📲 Todos ({{ installed_count }} teléfonos activos)</option>
                                     {% for client in clients %}
                                     <option value="{{ client.serial }}">{{ client.name }} ({{ client.serial }})</option>
                                     {% endfor %}
@@ -2088,12 +2416,12 @@ BARISTA_HTML = """
             </div>
         </section>
 
-        <!-- LISTA DE CLIENTES -->
+        <!-- LISTA OPERATIVA DE CLIENTES -->
         <section class="clients-section">
             <div class="clients-top-bar">
                 <div class="filter-tabs" id="filter-tabs-bar">
                     <button type="button" class="filter-pill active" data-tab="all" onclick="setFilterTab('all')">Todos ({{ clients|length }})</button>
-                    <button type="button" class="filter-pill" data-tab="installed" onclick="setFilterTab('installed')">📲 Activos /🤖 ({{ installed_count }})</button>
+                    <button type="button" class="filter-pill" data-tab="installed" onclick="setFilterTab('installed')">📲 Activos ({{ installed_count }})</button>
                     <button type="button" class="filter-pill" data-tab="ready" onclick="setFilterTab('ready')">🎁 Listos para Canjear ({{ ready_to_redeem_count }})</button>
                     <button type="button" class="filter-pill" data-tab="bday" onclick="setFilterTab('bday')">🎂 Cumpleaños ({{ upcoming_birthdays|length + month_birthdays_count }})</button>
                     <button type="button" class="filter-pill" data-tab="vip" onclick="setFilterTab('vip')">♛ Socios VIP ({{ gold_count + silver_count }})</button>
@@ -2104,7 +2432,7 @@ BARISTA_HTML = """
                 {% for client in clients %}
                 <div id="row-{{ client.serial }}"
                      class="client-card-row client-row {{ 'highlight-row' if updated_serial == client.serial else '' }}"
-                     data-search="{{ (client.name ~ ' ' ~ client.serial ~ ' ' ~ client.email ~ ' ' ~ client.phone ~ ' ' ~ client.tier.badge)|lower }}"
+                     data-search="{{ (client.name ~ ' ' ~ client.serial ~ ' ' ~ client.email ~ ' ' ~ client.phone ~ ' ' ~ client.tier.badge ~ ' ' ~ client.created_at)|lower }}"
                      data-installed="{{ '1' if client.is_installed else '0' }}"
                      data-ready="{{ '1' if client.stamps >= 10 else '0' }}"
                      data-bday="{{ '1' if (client.bday.is_upcoming_week or client.bday.is_this_month) else '0' }}"
@@ -2128,6 +2456,7 @@ BARISTA_HTML = """
                             <div class="client-meta">
                                 {% if client.email %}<span>✉️ {{ client.email }}</span>{% endif %}
                                 {% if client.phone %}<span>📱 {{ client.phone }}</span>{% endif %}
+                                {% if client.created_at %}<span>🗓️ Alta: {{ client.created_at }}</span>{% endif %}
                             </div>
                             {% if client.message %}
                             <div class="client-msg-preview">💬 "{{ client.message }}"</div>
@@ -2152,19 +2481,19 @@ BARISTA_HTML = """
 
                     <div class="telemetry-col">
                         {% if client.ios_installed and client.android_installed %}
-                        <span class="status-pill-on"> iPhone + 🤖 Android Activos</span>
+                        <span class="status-pill-on">📲 Activo en iPhone y Android</span>
                         {% elif client.ios_installed %}
-                        <span class="status-pill-on"> Activo en iPhone ({{ client.ios_count }})</span>
+                        <span class="status-pill-on"> Activo en iPhone</span>
                         {% elif client.android_installed %}
                         <span class="status-pill-on">🤖 Activo en Android</span>
                         {% else %}
-                        <span class="status-pill-off">⏳ Pendiente de instalar</span>
+                        <span class="status-pill-off">⏳ Aún no instala su tarjeta</span>
                         {% endif %}
-                        {% if client.last_push_status %}
-                        <span class="tele-line">📡 {{ client.last_push_status }}</span>
+                        {% if client.last_push_clean %}
+                        <span class="tele-line">{{ client.last_push_clean }}</span>
                         {% endif %}
-                        {% if client.last_sync_at %}
-                        <span class="tele-line" style="color:#7CE8B5;">🔄 Sincronizado: {{ client.last_sync_at }}</span>
+                        {% if client.last_sync_clean %}
+                        <span class="tele-line" style="color:#7CE8B5;">🔄 Hora local Sonora: {{ client.last_sync_clean }}</span>
                         {% endif %}
                     </div>
 
@@ -2176,33 +2505,45 @@ BARISTA_HTML = """
                         </form>
 
                         {% if client.stamps >= 10 %}
-                        <form action="/api/add-stamp" method="POST" style="margin:0;" onsubmit="return confirm('¿Canjear 1 Café Gratis y reiniciar a 0/10 sellos para {{ client.name }}?');">
+                        <form id="form-redeem-{{ client.serial }}" action="/api/add-stamp" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="reset">
-                            <button type="submit" class="btn-redeem-glow">🎁 Canjear Café</button>
+                            <button type="button" class="btn-redeem-glow"
+                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                🎁 Canjear Café
+                            </button>
                         </form>
                         {% elif client.stamps > 0 %}
-                        <form action="/api/add-stamp" method="POST" style="margin:0;" onsubmit="return confirm('¿Canjear recompensa y reiniciar a 0/10 para {{ client.name }}?');">
+                        <form id="form-redeem-{{ client.serial }}" action="/api/add-stamp" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="reset">
-                            <button type="submit" class="btn-redeem-normal">🎁 Canjear</button>
+                            <button type="button" class="btn-redeem-normal"
+                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                🎁 Canjear
+                            </button>
                         </form>
                         {% endif %}
 
                         {% if client.stamps > 0 %}
-                        <form action="/api/add-stamp" method="POST" style="margin:0;">
+                        <form id="form-sub-{{ client.serial }}" action="/api/add-stamp" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="sub">
-                            <button type="submit" class="btn-icon-sec" title="Restar 1 sello">-1</button>
+                            <button type="button" class="btn-icon-sec" title="Restar 1 sello"
+                                    onclick="openConfirmModal('sub', 'form-sub-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                -1
+                            </button>
                         </form>
                         {% endif %}
 
-                        <a href="/card/{{ client.serial }}" target="_blank" class="btn-icon-sec" title="Abrir Tarjeta Digital Android/Web de {{ client.name }}">📲</a>
-                        <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name }}')">💬</button>
+                        <a href="/card/{{ client.serial }}" target="_blank" class="btn-icon-sec" title="Abrir Tarjeta Digital de {{ client.name }}">📲</a>
+                        <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name|e }}')">💬</button>
 
-                        <form action="/api/delete-client" method="POST" style="margin:0;" onsubmit="return confirm('¿Eliminar permanentemente a {{ client.name }} ({{ client.serial }})?');">
+                        <form id="form-del-{{ client.serial }}" action="/api/delete-client" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
-                            <button type="submit" class="btn-icon-sec btn-icon-del" title="Eliminar registro">🗑️</button>
+                            <button type="button" class="btn-icon-sec btn-icon-del" title="Eliminar registro"
+                                    onclick="openConfirmModal('delete', 'form-del-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                🗑️
+                            </button>
                         </form>
                     </div>
                 </div>
@@ -2211,6 +2552,94 @@ BARISTA_HTML = """
                     No hay clientes registrados todavía.
                 </div>
                 {% endfor %}
+            </div>
+        </section>
+        </div>
+
+        <!-- VISTA 2: BASE DE DATOS EJECUTIVA Y DESCARGA DE MACHOTE EXCEL (.CSV) -->
+        <section id="view-db-container" class="db-view-section">
+            <div class="db-header-card">
+                <div>
+                    <h2 style="margin:0; font-size:20px; font-weight:800; color:var(--text-primary);">
+                        📊 Base de Datos General de Clientes
+                    </h2>
+                    <p style="margin:4px 0 0; font-size:13px; color:var(--text-secondary);">
+                        Consulta todos los datos capturados, fecha de alta en hora local de Navojoa, Sonora, historial de visitas y exporta tu machote para Excel.
+                    </p>
+                </div>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <a href="/api/export-clients.csv" class="btn-export-csv">
+                        📥 Descargar Machote de Clientes (.CSV para Excel)
+                    </a>
+                </div>
+            </div>
+
+            <div class="db-table-wrap">
+                <table class="db-table">
+                    <thead>
+                        <tr>
+                            <th>Código Serial</th>
+                            <th>Nombre del Cliente</th>
+                            <th>Celular</th>
+                            <th>Correo Electrónico</th>
+                            <th>Fecha Nacimiento</th>
+                            <th>Fecha de Alta (Sonora)</th>
+                            <th>Teléfono / Estado</th>
+                            <th>Sellos</th>
+                            <th>Visitas Totales</th>
+                            <th>Cafés Canjeados</th>
+                            <th>Nivel VIP</th>
+                            <th>Última Actividad</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for client in clients %}
+                        <tr class="db-client-row"
+                            data-search="{{ (client.name ~ ' ' ~ client.serial ~ ' ' ~ client.email ~ ' ' ~ client.phone ~ ' ' ~ client.tier.badge ~ ' ' ~ client.created_at)|lower }}">
+                            <td><span class="serial-tag">{{ client.serial }}</span></td>
+                            <td><strong>{{ client.name }}</strong></td>
+                            <td>{{ client.phone if client.phone else '—' }}</td>
+                            <td>{{ client.email if client.email else '—' }}</td>
+                            <td>
+                                {% if client.birthdate %}
+                                    {{ client.birthdate }} ({{ client.bday.short_date }})
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
+                            <td>{{ client.created_at if client.created_at else '—' }}</td>
+                            <td>
+                                {% if client.ios_installed and client.android_installed %}
+                                    <span class="status-pill-on"> iPhone + 🤖 Android</span>
+                                {% elif client.ios_installed %}
+                                    <span class="status-pill-on"> iPhone</span>
+                                {% elif client.android_installed %}
+                                    <span class="status-pill-on">🤖 Android</span>
+                                {% else %}
+                                    <span class="status-pill-off">⏳ Pendiente</span>
+                                {% endif %}
+                            </td>
+                            <td><strong style="color:var(--gold-light);">{{ client.stamps }} / 10</strong></td>
+                            <td>{{ client.total_visits }}</td>
+                            <td>{{ client.redeemed_count }}</td>
+                            <td>
+                                <span class="vip-pill" style="background:{{ client.tier.bg }}; color:{{ client.tier.fg }}; border:1px solid {{ client.tier.border }};">
+                                    {{ client.tier.badge }}
+                                </span>
+                            </td>
+                            <td style="font-size:12px; color:var(--text-secondary);">
+                                {{ client.last_sync_clean if client.last_sync_clean else (client.last_push_clean if client.last_push_clean else '—') }}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="12" style="text-align:center; padding:32px; color:var(--text-secondary);">
+                                No hay clientes registrados todavía.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </section>
     </main>
@@ -2229,7 +2658,79 @@ BARISTA_HTML = """
             }, 6500);
         }
 
+        // Cambio entre Vista Mostrador POS y Vista Base de Datos / Excel
+        function switchMainView(view) {
+            const posContainer = document.getElementById('view-pos-container');
+            const dbContainer = document.getElementById('view-db-container');
+            const btnPos = document.getElementById('nav-btn-pos');
+            const btnDb = document.getElementById('nav-btn-db');
+            if (view === 'db') {
+                posContainer.style.display = 'none';
+                dbContainer.style.display = 'block';
+                btnPos.classList.remove('active');
+                btnDb.classList.add('active');
+            } else {
+                posContainer.style.display = 'block';
+                dbContainer.style.display = 'none';
+                btnPos.classList.add('active');
+                btnDb.classList.remove('active');
+            }
+        }
+
+        // Modal de Confirmación Personalizado (Sin URL de navegador)
+        let pendingFormId = null;
+        function openConfirmModal(actionType, formId, clientName, serial, currentStamps) {
+            pendingFormId = formId;
+            const modal = document.getElementById('maishas-confirm-modal');
+            const iconBox = document.getElementById('cm-icon-box');
+            const titleEl = document.getElementById('cm-title-text');
+            const descEl = document.getElementById('cm-desc-text');
+            const confirmBtn = document.getElementById('cm-confirm-btn');
+
+            if (actionType === 'delete') {
+                iconBox.className = 'cm-icon danger';
+                iconBox.textContent = '🗑️';
+                titleEl.textContent = '¿Eliminar cliente?';
+                descEl.innerHTML = 'Estás por eliminar permanentemente a <strong>' + clientName + '</strong> (' + serial + '). Esta acción no se puede deshacer.';
+                confirmBtn.className = 'cm-btn-confirm danger';
+                confirmBtn.textContent = 'Sí, eliminar';
+            } else if (actionType === 'sub') {
+                const nextStamps = Math.max(0, currentStamps - 1);
+                iconBox.className = 'cm-icon warn';
+                iconBox.textContent = '☕️';
+                titleEl.textContent = '¿Corregir sellos (-1)?';
+                descEl.innerHTML = '¿Estás seguro de quitar 1 sello a <strong>' + clientName + '</strong>? Su tarjeta pasará de <strong>' + currentStamps + ' / 10</strong> a <strong>' + nextStamps + ' / 10</strong> sellos.';
+                confirmBtn.className = 'cm-btn-confirm warn';
+                confirmBtn.textContent = 'Sí, restar 1 sello';
+            } else if (actionType === 'redeem') {
+                iconBox.className = 'cm-icon success';
+                iconBox.textContent = '🎁';
+                titleEl.textContent = '¿Canjear Café Gratis?';
+                descEl.innerHTML = 'Se entregará 1 Café Gratis a <strong>' + clientName + '</strong> y su tarjeta se reiniciará a <strong>0 / 10</strong> sellos.';
+                confirmBtn.className = 'cm-btn-confirm success';
+                confirmBtn.textContent = 'Sí, canjear café';
+            }
+
+            modal.classList.add('open');
+        }
+
+        function closeConfirmModal() {
+            pendingFormId = null;
+            document.getElementById('maishas-confirm-modal').classList.remove('open');
+        }
+
+        function executeConfirmedForm() {
+            if (pendingFormId) {
+                const form = document.getElementById(pendingFormId);
+                if (form) form.submit();
+            }
+            closeConfirmModal();
+        }
+
         document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeConfirmModal();
+            }
             if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
                 const searchInput = document.getElementById('client-search');
@@ -2256,6 +2757,7 @@ BARISTA_HTML = """
         }
 
         function selectClientForPush(serial, name) {
+            switchMainView('pos');
             switchMktTab('push');
             const sel = document.getElementById('push-target-select');
             const box = document.getElementById('push-msg-box');
@@ -2309,11 +2811,16 @@ BARISTA_HTML = """
                 else if (activeTab === 'vip') matchesTab = row.getAttribute('data-vip') === '1';
                 row.style.display = (matchesQuery && matchesTab) ? '' : 'none';
             });
+
+            const dbRows = document.querySelectorAll('.db-client-row');
+            dbRows.forEach(row => {
+                const searchTxt = row.getAttribute('data-search') || '';
+                row.style.display = (!q || searchTxt.includes(q)) ? '' : 'none';
+            });
         }
 
         function detectMyGPS() {
             if (!navigator.geolocation) {
-                alert('Tu navegador no soporta geolocalización.');
                 return;
             }
             navigator.geolocation.getCurrentPosition(
@@ -2321,7 +2828,7 @@ BARISTA_HTML = """
                     document.getElementById('lat-input').value = pos.coords.latitude.toFixed(6);
                     document.getElementById('lng-input').value = pos.coords.longitude.toFixed(6);
                 },
-                err => alert('No se pudo obtener la ubicación GPS: ' + err.message),
+                () => {},
                 { enableHighAccuracy: true }
             );
         }
@@ -2378,7 +2885,8 @@ BARISTA_HTML = """
                 video.onclick = stopScanner;
                 requestAnimationFrame(scanTick);
             } catch (err) {
-                alert('No se pudo abrir la cámara: ' + err.message);
+                status.style.display = 'block';
+                status.textContent = '⚠️ No se pudo abrir la cámara: ' + err.message;
             }
         }
 
@@ -2455,7 +2963,8 @@ def generate_signed_pkpass(
     phone=None,
     birthdate=None,
     total_visits=None,
-    redeemed_count=0
+    redeemed_count=0,
+    last_action="add"
 ):
     temp_dir = tempfile.mkdtemp(prefix=f"pass_{serial_number}_")
     try:
@@ -2470,8 +2979,9 @@ def generate_signed_pkpass(
         stamps = max(0, min(10, int(stamps_count or 0)))
         visits = total_visits if total_visits is not None else stamps
         tier = get_vip_tier(visits)
+        clean_visible_msg = (message or DEFAULT_MESSAGE).replace("\u200b", "")
 
-        render_dynamic_strip(stamps, temp_dir, total_visits=visits)
+        render_dynamic_strip(stamps, temp_dir, total_visits=visits, message=clean_visible_msg)
 
         pass_json_path = os.path.join(temp_dir, "pass.json")
         with open(pass_json_path, "r", encoding="utf-8") as f:
@@ -2492,12 +3002,15 @@ def generate_signed_pkpass(
             }
         ]
 
-        if stamps == 0:
-            stamp_change_msg = "🎁 ¡Sellos actualizados en Maishas Café! Total: %@"
+        # Mensaje de notificación inteligente según la acción realizada (evita decir 'ganaste 1 sello' cuando se restó -1)
+        if last_action == "sub":
+            stamp_change_msg = "☕️ Tu tarjeta Maishas Café está al día. Sellos acumulados: %@"
+        elif last_action == "reset" or stamps == 0:
+            stamp_change_msg = "🎁 ¡Disfruta tu Café Gratis! Tu tarjeta Maishas Café está en: %@"
         elif stamps >= 10:
             stamp_change_msg = "🎉 ¡Felicidades! Completaste %@ sellos. ¡Tienes 1 Café Gratis en Maishas Café!"
         else:
-            stamp_change_msg = "¡Has ganado 1 nuevo sello en Maishas Café! ☕️ Total: %@"
+            stamp_change_msg = "☕️ ¡Has ganado 1 nuevo sello en Maishas Café! Total: %@"
 
         pass_data["storeCard"]["headerFields"] = [
             {
@@ -2512,35 +3025,23 @@ def generate_signed_pkpass(
         pass_data["storeCard"]["primaryFields"] = []
 
         reward_status = "¡CAFÉ GRATIS! 🎉" if stamps >= 10 else f"Faltan {10 - stamps} sellos"
-        clean_visible_msg = (message or DEFAULT_MESSAGE).replace("\u200b", "")
 
+        # 2 columnas amplias debajo del strip para que el AVISO se lea completo sin truncarse en iOS
         pass_data["storeCard"]["secondaryFields"] = [
             {
                 "key": "memberName",
-                "label": "CLIENTE",
+                "label": f"CLIENTE · {tier['short'].upper()}",
                 "value": client_name
             },
             {
-                "key": "balance",
-                "label": "NIVEL VIP",
-                "value": tier["name"],
-                "changeMessage": "🏆 ¡Subiste de nivel en Maishas Café! Ahora eres: %@"
-            },
-            {
-                "key": "reward",
-                "label": "PREMIO",
-                "value": reward_status,
+                "key": "promo",
+                "label": f"AVISO · {reward_status.upper()}",
+                "value": clean_visible_msg,
                 "textAlignment": "PKTextAlignmentRight"
             }
         ]
 
-        pass_data["storeCard"]["auxiliaryFields"] = [
-            {
-                "key": "promo",
-                "label": "AVISO MAISHAS",
-                "value": clean_visible_msg
-            }
-        ]
+        pass_data["storeCard"]["auxiliaryFields"] = []
 
         shop_loc = get_shop_location()
         pass_data["locations"] = [
@@ -2624,7 +3125,7 @@ def generate_signed_pkpass(
 
 
 # ---------------------------------------------------------
-# RUTA PRINCIPAL, BARISTA Y TARJETA ANDROID
+# RUTA PRINCIPAL, BARISTA, EXPORTACIÓN EXCEL Y TARJETA ANDROID
 # ---------------------------------------------------------
 
 @app.route("/")
@@ -2642,7 +3143,8 @@ def barista():
                c.phone, c.birthdate, c.last_push_status, c.last_sync_at,
                (SELECT COUNT(*) FROM registrations r WHERE r.serial = c.serial) as reg_count,
                c.total_visits, c.redeemed_count, c.android_active,
-               (SELECT COUNT(*) FROM android_subscriptions a WHERE a.serial = c.serial) as and_sub_count
+               (SELECT COUNT(*) FROM android_subscriptions a WHERE a.serial = c.serial) as and_sub_count,
+               c.created_at
         FROM clients c
         ORDER BY c.rowid DESC
     """)
@@ -2691,6 +3193,10 @@ def barista():
         if bday_info["is_this_month"]:
             month_birthdays_count += 1
 
+        created_at_clean = format_sonora_time(r[15] or "")
+        last_push_clean = humanize_push_status(r[8] or "")
+        last_sync_clean = format_sonora_time(r[9] or "")
+
         client_obj = {
             "serial": r[0],
             "name": full_name,
@@ -2704,7 +3210,10 @@ def barista():
             "birthdate": r[7] or "",
             "bday": bday_info,
             "last_push_status": r[8] or "",
+            "last_push_clean": last_push_clean,
             "last_sync_at": r[9] or "",
+            "last_sync_clean": last_sync_clean,
+            "created_at": created_at_clean,
             "ios_count": max(reg_count, 1 if r[4] else 0),
             "ios_installed": ios_installed,
             "android_installed": android_installed,
@@ -2735,6 +3244,92 @@ def barista():
     )
 
 
+@app.route("/api/export-clients.csv")
+@requires_auth
+def export_clients_csv():
+    """Descarga el machote completo de clientes en formato CSV compatible con Microsoft Excel (UTF-8 con BOM)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT c.serial, c.name, c.email, c.phone, c.birthdate, c.created_at,
+               c.stamps, c.total_visits, c.redeemed_count, c.message,
+               c.last_sync_at, c.last_push_status, c.push_token, c.android_active,
+               (SELECT COUNT(*) FROM registrations r WHERE r.serial = c.serial) as reg_count,
+               (SELECT COUNT(*) FROM android_subscriptions a WHERE a.serial = c.serial) as and_sub_count
+        FROM clients c
+        ORDER BY c.rowid DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    # Escribir BOM UTF-8 para que Microsoft Excel reconozca acentos y eñes automáticamente
+    output.write("\ufeff")
+    writer = csv.writer(output)
+    writer.writerow([
+        "Código Serial",
+        "Nombre del Cliente",
+        "Número de Celular",
+        "Correo Electrónico",
+        "Fecha de Nacimiento",
+        "Fecha de Alta (Sonora)",
+        "Dispositivo Activo",
+        "Sellos Actuales (de 10)",
+        "Visitas Históricas",
+        "Cafés Gratis Canjeados",
+        "Nivel VIP",
+        "Último Aviso en Tarjeta",
+        "Última Actividad (Sonora)"
+    ])
+
+    for r in rows:
+        serial, name, email, phone, bdate, created_at, stamps, visits, redeemed, msg, sync_at, push_st, p_tok, and_act, reg_c, and_c = r
+        ios_on = bool(p_tok) or ((reg_c or 0) > 0)
+        and_on = bool(and_act) or ((and_c or 0) > 0)
+        if ios_on and and_on:
+            dev_label = "iPhone + Android"
+        elif ios_on:
+            dev_label = "iPhone (Apple Wallet)"
+        elif and_on:
+            dev_label = "Android Wallet"
+        else:
+            dev_label = "Pendiente de instalar"
+
+        stamps_v = stamps or 0
+        visits_v = visits if visits is not None else stamps_v
+        redeemed_v = redeemed or 0
+        tier_name = get_vip_tier(visits_v)["name"]
+        clean_msg = (msg or DEFAULT_MESSAGE).replace("\u200b", "")
+        created_clean = format_sonora_time(created_at or "")
+        act_clean = format_sonora_time(sync_at or "") or humanize_push_status(push_st or "")
+
+        writer.writerow([
+            serial or "",
+            name or "",
+            phone or "",
+            email or "",
+            bdate or "",
+            created_clean,
+            dev_label,
+            stamps_v,
+            visits_v,
+            redeemed_v,
+            tier_name,
+            clean_msg,
+            act_clean
+        ])
+
+    csv_bytes = output.getvalue().encode("utf-8")
+    now_str = datetime.now(SONORA_TZ).strftime("%Y-%m-%d")
+    return Response(
+        csv_bytes,
+        mimetype="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="Clientes_MaishasCafe_{now_str}.csv"'
+        }
+    )
+
+
 @app.route("/api/register", methods=["POST"])
 def register():
     name = (request.form.get("name") or "").strip()
@@ -2752,14 +3347,15 @@ def register():
 
     serial_number = f"MAISHAS-{uuid.uuid4().hex[:6].upper()}"
     now_ts = get_utc_timestamp()
+    created_sonora = get_sonora_datetime_str()
     android_active = 1 if platform == "android" else 0
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at, platform, android_active)
-           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)""",
-        (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts, platform, android_active)
+        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at, platform, android_active, created_at, last_action)
+           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, 'add')""",
+        (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts, platform, android_active, created_sonora)
     )
     conn.commit()
     conn.close()
@@ -2771,7 +3367,7 @@ def register():
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
         serial_number, name, 0, host_url, DEFAULT_MESSAGE,
-        phone=phone, birthdate=birthdate, total_visits=0, redeemed_count=0
+        phone=phone, birthdate=birthdate, total_visits=0, redeemed_count=0, last_action="add"
     )
     safe_name = "".join(ch if ch.isalnum() else "_" for ch in name) or "Cliente"
     return send_file(
@@ -2837,10 +3433,11 @@ def android_card_view(serial_number):
 def android_card_strip(serial_number):
     serial_clean = (serial_number or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT stamps FROM clients WHERE UPPER(serial) = ?", (serial_clean,)).fetchone()
+    row = conn.execute("SELECT stamps, message FROM clients WHERE UPPER(serial) = ?", (serial_clean,)).fetchone()
     conn.close()
     stamps_val = row[0] if row else 0
-    img = _create_dynamic_strip_pil(stamps_val).resize((750, 250), Image.Resampling.LANCZOS)
+    msg_val = row[1] if row else DEFAULT_MESSAGE
+    img = _create_dynamic_strip_pil(stamps_val, message=msg_val).resize((750, 250), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
@@ -2867,7 +3464,7 @@ def download_pkpass_direct(serial_number):
     serial_clean = (serial_number or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT serial, name, stamps, message, phone, birthdate, total_visits, redeemed_count FROM clients WHERE UPPER(serial) = ?",
+        "SELECT serial, name, stamps, message, phone, birthdate, total_visits, redeemed_count, last_action FROM clients WHERE UPPER(serial) = ?",
         (serial_clean,)
     ).fetchone()
     conn.close()
@@ -2875,7 +3472,8 @@ def download_pkpass_direct(serial_number):
         return "No encontrado", 404
     pkpass_path = generate_signed_pkpass(
         row[0], row[1], row[2] or 0, request.host_url, row[3],
-        phone=row[4], birthdate=row[5], total_visits=row[6], redeemed_count=row[7] or 0
+        phone=row[4], birthdate=row[5], total_visits=row[6], redeemed_count=row[7] or 0,
+        last_action=row[8] or "add"
     )
     safe_name = "".join(ch if ch.isalnum() else "_" for ch in (row[1] or "Cliente"))
     return send_file(
@@ -3053,8 +3651,8 @@ def _perform_stamp_update(serial, action="add"):
         new_stamps = max(0, current_stamps - 1)
         new_visits = max(0, current_visits - 1)
         new_redeemed = current_redeemed
-        action_label = f"Sello restado a {client_name} ({serial_id}): {new_stamps}/10"
-        notif_body = f"Sellos actualizados en Maishas Café: {new_stamps} / 10"
+        action_label = f"Ajuste aplicado a {client_name} ({serial_id}): saldo actual {new_stamps}/10"
+        notif_body = f"☕️ Tu tarjeta Maishas Café está al día. Sellos acumulados: {new_stamps} / 10"
     elif action == "reset":
         new_stamps = 0
         new_visits = current_visits
@@ -3062,6 +3660,7 @@ def _perform_stamp_update(serial, action="add"):
         action_label = f"🎁 Café Gratis canjeado para {client_name} ({serial_id}): reiniciado a 0/10 (Total canjes: {new_redeemed}){bday_alert}"
         notif_body = "🎁 ¡Disfruta tu Café Gratis! Tu tarjeta se ha reiniciado a 0 / 10."
     else:
+        action = "add"
         if current_stamps >= 10:
             conn.close()
             return serial_id, f"ℹ️ {client_name} ({serial_id}) ya tiene 10/10 sellos. Usa '🎁 Canjear' para entregar su café gratis.{bday_alert}"
@@ -3079,14 +3678,14 @@ def _perform_stamp_update(serial, action="add"):
 
     now_ts = get_utc_timestamp()
     c.execute(
-        "UPDATE clients SET stamps = ?, total_visits = ?, redeemed_count = ?, updated_at = ? WHERE serial = ?",
-        (new_stamps, new_visits, new_redeemed, now_ts, serial_id)
+        "UPDATE clients SET stamps = ?, total_visits = ?, redeemed_count = ?, updated_at = ?, last_action = ? WHERE serial = ?",
+        (new_stamps, new_visits, new_redeemed, now_ts, action, serial_id)
     )
     conn.commit()
     conn.close()
 
     push_summary = send_apns_push_for_serial(serial_id, notification_body=notif_body)
-    return serial_id, f"{action_label} — {push_summary}"
+    return serial_id, f"{action_label} · {push_summary}"
 
 
 @app.route("/api/add-stamp", methods=["POST"])
@@ -3117,7 +3716,7 @@ def update_location():
         lat = float(lat_raw)
         lng = float(lng_raw)
     except ValueError:
-        return redirect(url_for("barista", ok="⚠️ Latitud y Longitud deben ser números válidos (ej. 24.8049, -107.3940)"))
+        return redirect(url_for("barista", ok="⚠️ Latitud y Longitud deben ser números válidos (ej. 27.0706, -109.4437)"))
 
     now_ts = get_utc_timestamp()
     conn = sqlite3.connect(DB_PATH)
@@ -3133,12 +3732,12 @@ def update_location():
     pushed = 0
     for s in serials:
         res = send_apns_push_for_serial(s, notification_body=relevant_text)
-        if "200 OK" in res or "Android" in res:
+        if "✅" in res:
             pushed += 1
 
     return redirect(url_for(
         "barista",
-        ok=f"📍 Ubicación GPS guardada ({lat:.5f}, {lng:.5f}) y sincronizada con {pushed} dispositivo(s) activos"
+        ok=f"📍 Ubicación GPS guardada ({lat:.5f}, {lng:.5f}) y sincronizada con {pushed} teléfono(s)"
     ))
 
 
@@ -3156,7 +3755,7 @@ def delete_client():
     conn.commit()
     conn.close()
     name = row[0] if row else serial
-    return redirect(url_for("barista", ok=f"🗑️ Cliente {name} ({serial}) eliminado"))
+    return redirect(url_for("barista", ok=f"🗑️ Cliente {name} ({serial}) eliminado correctamente"))
 
 
 @app.route("/api/send-message", methods=["POST"])
@@ -3191,15 +3790,15 @@ def send_message():
     last_res = ""
     for serial_id, _, _ in rows:
         last_res = send_apns_push_for_serial(serial_id, notification_body=f"📣 {raw_message}")
-        if "200 OK" in last_res or "Android" in last_res:
+        if "✅" in last_res:
             pushed_ok += 1
 
     if target == "all":
-        msg_status = f"📣 Mensaje enviado: {pushed_ok} cliente(s) en iPhone/Android notificados"
+        msg_status = f"📣 Aviso enviado a {pushed_ok} teléfono(s) activos ({get_short_time()})"
         return redirect(url_for("barista", ok=msg_status))
     else:
         target_name = rows[0][1] if rows else target
-        return redirect(url_for("barista", ok=f"📣 Mensaje enviado a {target_name} ({target}) — {last_res}", updated=target))
+        return redirect(url_for("barista", ok=f"📣 Aviso enviado a {target_name} · {last_res}", updated=target))
 
 
 # ---------------------------------------------------------
@@ -3283,7 +3882,7 @@ def get_latest_pass(pass_type_id, serial_number):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at FROM clients WHERE serial = ?",
+        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at, last_action FROM clients WHERE serial = ?",
         (serial_number,)
     )
     client = c.fetchone()
@@ -3291,7 +3890,7 @@ def get_latest_pass(pass_type_id, serial_number):
         conn.close()
         return "", 404
 
-    name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at_str = client
+    name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at_str, last_action = client
 
     try:
         dt_upd = datetime.strptime(updated_at_str, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
@@ -3318,7 +3917,8 @@ def get_latest_pass(pass_type_id, serial_number):
 
     pkpass_path = generate_signed_pkpass(
         serial_number, name, stamps or 0, request.host_url, message,
-        phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0
+        phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0,
+        last_action=last_action or "add"
     )
     response = send_file(pkpass_path, mimetype="application/vnd.apple.pkpass", conditional=False, max_age=0)
     response.headers["Last-Modified"] = formatdate(timeval=float(upd_epoch_sec), localtime=False, usegmt=True)
@@ -3364,7 +3964,7 @@ def send_android_webpush(sub_dict, serial, body_text):
 
 
 def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Café se ha actualizado ☕️"):
-    """Despacha notificaciones Push tanto a iPhones (Apple APNs) como a celulares Android (Web Push + Live Sync)."""
+    """Despacha notificaciones Push a iPhone y Android y devuelve un estado claro en hora local de Navojoa, Sonora."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     raw_tokens = [r[0] for r in c.execute("SELECT push_token FROM registrations WHERE serial = ? AND push_token IS NOT NULL", (serial,)).fetchall()]
@@ -3376,15 +3976,16 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
 
     android_subs = c.execute("SELECT endpoint, sub_json FROM android_subscriptions WHERE serial = ?", (serial,)).fetchall()
 
-    results = []
+    any_success = False
+    any_error = False
 
     # 1. Enviar a iPhones registrados (Apple APNs HTTP/2)
     for token in reg_tokens:
         ok, status_code, detail = send_apns_push(token)
         if ok:
-            results.append(f" 200 OK ({get_short_time()})")
+            any_success = True
         else:
-            results.append(f" Error {status_code}")
+            any_error = True
             if status_code == 410 or "Unregistered" in detail or "BadDeviceToken" in detail:
                 c.execute("DELETE FROM registrations WHERE push_token = ? AND serial = ?", (token, serial))
 
@@ -3394,19 +3995,22 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
             sub_dict = json.loads(sub_json_str)
             ok_and, code_and, _ = send_android_webpush(sub_dict, serial, notification_body)
             if ok_and:
-                results.append(f"🤖 Push 200 OK ({get_short_time()})")
+                any_success = True
             elif code_and in (404, 410):
                 c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
         except Exception:
             pass
 
-    if android_active and not any("🤖" in r for r in results):
-        results.append(f"🤖 Android Live Sync ({get_short_time()})")
+    if android_active:
+        any_success = True
 
-    if not results:
-        status_msg = "⏳ Sin dispositivo vinculado aún"
+    sonora_now = get_short_time()
+    if any_success:
+        status_msg = f"✅ Notificación enviada ({sonora_now})"
+    elif any_error:
+        status_msg = f"⚠️ No se pudo notificar ({sonora_now})"
     else:
-        status_msg = " | ".join(results)
+        status_msg = "⏳ Aún no instala su tarjeta"
 
     c.execute("UPDATE clients SET last_push_status = ? WHERE serial = ?", (status_msg, serial))
     conn.commit()
