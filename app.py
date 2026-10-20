@@ -53,6 +53,9 @@ for env_var, file_path in [("ENV_KEY_PEM", KEY_PEM), ("ENV_CERT_PEM", CERT_PEM),
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "MaishasSecretAuthToken2026")
 PASS_TYPE_ID = "pass.com.maishascafe.loyalty"
 DEFAULT_MESSAGE = "¡Bienvenido a Maishas Café! Aquí verás nuestras promociones."
+DEFAULT_LAT = 24.8049
+DEFAULT_LNG = -107.3940
+DEFAULT_GEO_TEXT = "☕️ ¡Estás cerca de Maishas Café! Pasa por tu café favorito y suma tu sello de hoy 🎃"
 
 
 def get_utc_timestamp():
@@ -63,6 +66,35 @@ def get_utc_timestamp():
 def get_short_time():
     """Retorna hora legible UTC para mostrar en el panel."""
     return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+
+def get_vip_tier(total_visits):
+    """Calcula el nivel VIP del cliente según su histórico acumulado de visitas."""
+    visits = total_visits or 0
+    if visits >= 25:
+        return {
+            "name": "Socio Oro VIP 👑",
+            "badge": "👑 Oro VIP",
+            "bg": "#d4af37",
+            "fg": "#1C1613",
+            "next_goal": "¡Máximo nivel alcanzado!"
+        }
+    elif visits >= 10:
+        return {
+            "name": "Socio Plata 🥈",
+            "badge": "🥈 Plata",
+            "bg": "#bdc3c7",
+            "fg": "#1C1613",
+            "next_goal": f"A {25 - visits} visitas de Oro VIP 👑"
+        }
+    else:
+        return {
+            "name": "Amante del Café ☕️",
+            "badge": "🌱 Bronce",
+            "bg": "#6E5036",
+            "fg": "#F3EDE2",
+            "next_goal": f"A {10 - visits} visitas de Nivel Plata 🥈"
+        }
 
 
 def init_db():
@@ -76,6 +108,8 @@ def init_db():
             phone TEXT,
             birthdate TEXT,
             stamps INTEGER DEFAULT 0,
+            total_visits INTEGER DEFAULT 0,
+            redeemed_count INTEGER DEFAULT 0,
             push_token TEXT,
             push_token_auth TEXT,
             message TEXT,
@@ -92,12 +126,16 @@ def init_db():
         ("birthdate", "ALTER TABLE clients ADD COLUMN birthdate TEXT"),
         ("last_push_status", "ALTER TABLE clients ADD COLUMN last_push_status TEXT"),
         ("last_sync_at", "ALTER TABLE clients ADD COLUMN last_sync_at TEXT"),
+        ("total_visits", "ALTER TABLE clients ADD COLUMN total_visits INTEGER DEFAULT 0"),
+        ("redeemed_count", "ALTER TABLE clients ADD COLUMN redeemed_count INTEGER DEFAULT 0"),
     ]
     for col_name, sql in migrations:
         if col_name not in cols:
             c.execute(sql)
 
-    # Asegurar que ningún registro antiguo tenga updated_at nulo
+    # Inicializar total_visits con el número actual de sellos para clientes existentes si está en 0
+    c.execute("UPDATE clients SET total_visits = COALESCE(stamps, 0) WHERE total_visits IS NULL OR (total_visits = 0 AND stamps > 0)")
+    c.execute("UPDATE clients SET redeemed_count = 0 WHERE redeemed_count IS NULL")
     c.execute("UPDATE clients SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (get_utc_timestamp(),))
 
     c.execute('''
@@ -116,11 +154,46 @@ def init_db():
             log_text TEXT
         )
     ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    # Valores iniciales de geolocalización de la cafetería
+    default_settings = {
+        "shop_lat": str(DEFAULT_LAT),
+        "shop_lng": str(DEFAULT_LNG),
+        "shop_relevant_text": DEFAULT_GEO_TEXT,
+    }
+    for k, v in default_settings.items():
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
     conn.commit()
     conn.close()
 
 
 init_db()
+
+
+def get_shop_location():
+    """Obtiene la configuración de geolocalización GPS de la cafetería."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    rows = dict(c.execute("SELECT key, value FROM settings").fetchall())
+    conn.close()
+    try:
+        lat = float(rows.get("shop_lat", DEFAULT_LAT))
+    except (TypeError, ValueError):
+        lat = DEFAULT_LAT
+    try:
+        lng = float(rows.get("shop_lng", DEFAULT_LNG))
+    except (TypeError, ValueError):
+        lng = DEFAULT_LNG
+    relevant_text = rows.get("shop_relevant_text") or DEFAULT_GEO_TEXT
+    return {"lat": lat, "lng": lng, "relevant_text": relevant_text}
+
 
 REGISTRATION_HTML = """
 <!DOCTYPE html>
@@ -143,6 +216,7 @@ REGISTRATION_HTML = """
         button:hover { background: #4A3B30; }
         .logo { font-size: 36px; margin-bottom: 8px; }
         .note { font-size: 12px; color: #8A6646; margin-top: 14px; }
+        .perks-box { background: #F9F6F0; border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; text-align: left; font-size: 12px; color: #554438; border: 1px solid #EAE0D5; }
     </style>
 </head>
 <body>
@@ -150,6 +224,12 @@ REGISTRATION_HTML = """
         <div class="logo">☕️🎃</div>
         <h1>Maishas Café</h1>
         <p class="subtitle">Regístrate para obtener tu Tarjeta de Fidelización en Apple Wallet</p>
+        <div class="perks-box">
+            ✨ <strong>Beneficios de tu tarjeta:</strong><br>
+            • 1 Café Gratis al acumular 10 sellos<br>
+            • Sube de nivel: <strong>Bronce 🌱 → Plata 🥈 → Oro VIP 👑</strong><br>
+            • Sorpresas en tu cumpleaños y promociones exclusivas
+        </div>
         <form action="/api/register" method="POST">
             <div class="field-group">
                 <label class="field-label">Nombre y Apellido *</label>
@@ -182,29 +262,45 @@ BARISTA_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Maishas Café - Panel Barista</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #2C221C; color: #F3EDE2; padding: 20px; text-align: center; margin: 0; }
-        .card { background: #3A2E26; padding: 20px; border-radius: 16px; max-width: 820px; margin: 0 auto 20px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); }
+        .card { background: #3A2E26; padding: 20px; border-radius: 16px; max-width: 900px; margin: 0 auto 20px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); text-align: left; }
+        .card h3 { margin-top: 0; color: #F3EDE2; display: flex; align-items: center; justify-content: space-between; }
         button { padding: 8px 12px; background: #8A6646; color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; margin: 2px; }
-        button:hover { opacity: 0.9; }
+        button:hover { opacity: 0.92; }
+        .btn-primary { background: #e67e22; font-size: 15px; padding: 12px 18px; }
         .btn-sub { background: #554438; }
         .btn-redeem { background: #d35400; }
         .btn-del { background: #7f1d1d; padding: 8px 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+        .btn-geo { background: #2980b9; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
         th, td { padding: 12px 10px; border-bottom: 1px solid #554438; text-align: left; vertical-align: middle; }
         th { color: #E8C39E; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .stamps { font-weight: bold; color: #E8C39E; font-size: 16px; white-space: nowrap; }
+        .visits-sub { font-size: 11px; color: #BBB; font-weight: normal; display: block; margin-top: 3px; }
         .badge { background: #27ae60; color: white; padding: 4px 8px; border-radius: 10px; font-size: 11px; display: inline-block; font-weight: 600; }
         .badge-off { background: #7f8c8d; color: white; padding: 4px 8px; border-radius: 10px; font-size: 11px; display: inline-block; }
-        textarea, select { width: 100%; box-sizing: border-box; padding: 12px; margin: 6px 0; border-radius: 10px; border: 1px solid #554438; background: #2C221C; color: #F3EDE2; font-size: 15px; font-family: inherit; }
-        .hint { font-size: 12px; color: #BBB; margin: 8px 0 0; }
-        .toast { background: #27ae60; color: white; padding: 14px 18px; font-weight: 600; border-radius: 12px; max-width: 820px; margin: 0 auto 20px; display: flex; justify-content: space-between; align-items: center; }
+        .tier-badge { padding: 3px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; display: inline-block; margin-left: 6px; }
+        textarea, select, input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; padding: 11px 12px; margin: 6px 0; border-radius: 10px; border: 1px solid #554438; background: #2C221C; color: #F3EDE2; font-size: 14px; font-family: inherit; }
+        .hint { font-size: 12px; color: #BBB; margin: 6px 0 0; }
+        .toast { background: #27ae60; color: white; padding: 14px 18px; font-weight: 600; border-radius: 12px; max-width: 900px; margin: 0 auto 20px; display: flex; justify-content: space-between; align-items: center; text-align: left; }
         .meta-info { color: #CCC; font-size: 12px; line-height: 1.4; margin-top: 3px; }
         .last-msg { color: #E8C39E; font-size: 11px; font-style: italic; display: inline-block; margin-top: 3px; }
         .sync-info { color: #A3E4D7; font-size: 11px; display: block; margin-top: 4px; }
         .push-info { color: #F5B041; font-size: 11px; display: block; margin-top: 2px; }
-        .highlight-row { background-color: rgba(39, 174, 96, 0.18); transition: background-color 2s ease; }
+        .highlight-row { background-color: rgba(39, 174, 96, 0.22); transition: background-color 2s ease; }
         .actions-cell { white-space: nowrap; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 900px; margin: 0 auto 20px; }
+        @media (max-width: 720px) { .grid-2 { grid-template-columns: 1fr; } }
+        .grid-2 .card { margin: 0; width: 100%; box-sizing: border-box; }
+        #scanner-box { display: none; margin-top: 12px; background: #1E1713; padding: 12px; border-radius: 12px; text-align: center; border: 1px solid #8A6646; }
+        #qr-video { width: 100%; max-width: 360px; border-radius: 10px; background: #000; }
+        .quick-scan-bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+        .stats-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+        .stat-pill { background: #2C221C; border: 1px solid #554438; border-radius: 10px; padding: 8px 14px; font-size: 13px; }
+        .stat-pill strong { color: #E8C39E; font-size: 16px; }
+        details summary { cursor: pointer; font-weight: 600; color: #E8C39E; outline: none; }
     </style>
 </head>
 <body>
@@ -216,41 +312,118 @@ BARISTA_HTML = """
     </div>
     {% endif %}
 
-    <div class="card">
-        <h3>📣 Enviar notificación Push a clientes</h3>
-        <form action="/api/send-message" method="POST">
-            <textarea name="message" maxlength="200" rows="2" placeholder="Ej: ¡Hoy 2x1 en lattes de 4 a 6 pm! ☕️🎃" required></textarea>
-            <select name="target">
-                <option value="all">📲 Todos los clientes con tarjeta instalada ({{ installed_count }} iPhones activos)</option>
-                {% for client in clients %}
-                <option value="{{ client.serial }}">
-                    {{ client.name }} ({{ client.serial }}) — {{ '📲 En iPhone' if client.is_installed else '⏳ Sin instalar' }} — {{ client.stamps }}/10 sellos
-                </option>
-                {% endfor %}
-            </select>
-            <button type="submit" style="width:100%; padding:12px; font-size:15px; margin-top:6px;">Enviar notificación Push 📲</button>
-        </form>
-        <p class="hint">Envía una alerta inmediata a la pantalla bloqueada del iPhone y actualiza el aviso en su tarjeta.</p>
+    <div class="grid-2">
+        <!-- 1. ESCÁNER QR EN VIVO Y LECTURA RÁPIDA -->
+        <div class="card">
+            <h3>
+                <span>📷 Escáner QR de Clientes</span>
+                <button type="button" id="btn-toggle-cam" class="btn-primary" onclick="toggleScanner()">📷 Abrir Cámara QR</button>
+            </h3>
+            <p class="hint" style="margin-bottom:10px;">Escanea el código QR del Apple Wallet del cliente con la cámara o con un lector físico para sumar su sello al instante.</p>
+
+            <label style="font-size:13px; display:flex; align-items:center; gap:6px; cursor:pointer; margin-bottom:8px;">
+                <input type="checkbox" id="auto-stamp-check" checked style="width:auto; margin:0;">
+                ⚡ <strong>Modo Rápido:</strong> Sumar +1 sello automáticamente al detectar el QR
+            </label>
+
+            <div id="scanner-box">
+                <video id="qr-video" playsinline muted></video>
+                <canvas id="qr-canvas" style="display:none;"></canvas>
+                <div id="qr-status" style="font-size:13px; color:#E8C39E; margin-top:8px;">Apunta al código QR de la tarjeta en el iPhone...</div>
+            </div>
+
+            <form id="scan-form" action="/api/scan-action" method="POST" class="quick-scan-bar">
+                <input type="text" id="scan-serial-input" name="serial" placeholder="Código o Serial (ej. MAISHAS-AD58E5)" required style="margin:0;">
+                <input type="hidden" name="action" id="scan-action-input" value="add">
+                <button type="submit" style="white-space:nowrap; padding:11px 14px;">+1 Sello ☕️</button>
+            </form>
+        </div>
+
+        <!-- 2. ENVIAR NOTIFICACIÓN PUSH -->
+        <div class="card">
+            <h3>📣 Enviar Notificación Push</h3>
+            <form action="/api/send-message" method="POST">
+                <textarea name="message" id="push-msg-box" maxlength="200" rows="2" placeholder="Ej: ¡Hoy 2x1 en lattes de 4 a 6 pm! ☕️🎃" required></textarea>
+                <div style="margin: 4px 0 6px; display:flex; gap:4px; flex-wrap:wrap;">
+                    <button type="button" class="btn-sub" style="font-size:11px; padding:4px 8px;" onclick="setTemplate('🥐 ¡Recién salidos del horno! Ven por tu pan calientito y suma tu sello de hoy ☕️')">🥐 Pan recién horneado</button>
+                    <button type="button" class="btn-sub" style="font-size:11px; padding:4px 8px;" onclick="setTemplate('🎃 ¡Hora Feliz en Maishas Café! 2x1 en bebidas seleccionadas hoy de 4 a 6 pm 👻')">🎃 Hora Feliz 2x1</button>
+                    <button type="button" class="btn-sub" style="font-size:11px; padding:4px 8px;" onclick="setTemplate('✨ ¡Hoy tus compras valen DOBLE sello en Maishas Café! Te esperamos ☕️')">✨ Doble Sello Hoy</button>
+                </div>
+                <select name="target">
+                    <option value="all">📲 Todos los clientes ({{ installed_count }} iPhones activos)</option>
+                    {% for client in clients %}
+                    <option value="{{ client.serial }}">
+                        {{ client.name }} ({{ client.serial }}) — {{ client.tier.badge }} — {{ client.stamps }}/10
+                    </option>
+                    {% endfor %}
+                </select>
+                <button type="submit" style="width:100%; padding:11px; font-size:14px; margin-top:4px;">Enviar Notificación Push 📲</button>
+            </form>
+        </div>
     </div>
 
+    <!-- 3. GEOLOCALIZACIÓN GPS DE LA CAFETERÍA -->
     <div class="card">
-        <h3>👥 Clientes Registrados ({{ clients|length }})</h3>
+        <details>
+            <summary>📍 Geolocalización Inteligente en Apple Wallet (Alerta automática al pasar cerca de la cafetería) — Activa en ({{ "%.4f"|format(shop_loc.lat) }}, {{ "%.4f"|format(shop_loc.lng) }})</summary>
+            <form action="/api/update-location" method="POST" style="margin-top:14px;">
+                <p class="hint" style="margin-bottom:10px;">
+                    Cuando tus clientes pasen a ~100 metros de estas coordenadas GPS, su iPhone encenderá la pantalla bloqueada automáticamente con este mensaje invitándolos a entrar.
+                </p>
+                <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:10px; align-items:end;">
+                    <div>
+                        <label style="font-size:12px; color:#E8C39E;">Latitud GPS</label>
+                        <input type="text" id="lat-input" name="lat" value="{{ shop_loc.lat }}" required>
+                    </div>
+                    <div>
+                        <label style="font-size:12px; color:#E8C39E;">Longitud GPS</label>
+                        <input type="text" id="lng-input" name="lng" value="{{ shop_loc.lng }}" required>
+                    </div>
+                    <div style="padding-bottom:6px;">
+                        <button type="button" class="btn-geo" onclick="detectMyGPS()" style="padding:11px 14px;">📍 Usar mi GPS actual</button>
+                    </div>
+                </div>
+                <div style="margin-top:6px;">
+                    <label style="font-size:12px; color:#E8C39E;">Mensaje en pantalla bloqueada al pasar cerca de la cafetería:</label>
+                    <input type="text" name="relevant_text" value="{{ shop_loc.relevant_text }}" maxlength="160" required>
+                </div>
+                <button type="submit" style="margin-top:8px; padding:10px 18px;">💾 Guardar Coordenadas y Actualizar Tarjetas</button>
+            </form>
+        </details>
+    </div>
+
+    <!-- 4. TABLA DE CLIENTES CON NIVELES VIP Y BUSCADOR -->
+    <div class="card">
+        <h3>
+            <span>👥 Clientes Registrados ({{ clients|length }})</span>
+        </h3>
+        <div class="stats-bar">
+            <div class="stat-pill">📲 En iPhone: <strong>{{ installed_count }}</strong></div>
+            <div class="stat-pill">👑 Socios Oro VIP: <strong>{{ gold_count }}</strong></div>
+            <div class="stat-pill">🥈 Socios Plata: <strong>{{ silver_count }}</strong></div>
+            <div class="stat-pill">🎁 Cafés Canjeados: <strong>{{ total_redeemed }}</strong></div>
+        </div>
+
+        <input type="text" id="client-search" placeholder="🔍 Buscar cliente por nombre, código MAISHAS, celular o correo..." oninput="filterClients()">
+
         <div style="overflow-x: auto;">
-            <table>
+            <table id="clients-table">
                 <thead>
                     <tr>
-                        <th>Cliente / Datos</th>
+                        <th>Cliente / Nivel VIP</th>
                         <th>Estado en Apple Wallet</th>
-                        <th>Sellos</th>
+                        <th>Sellos / Historial</th>
                         <th>Acciones por Usuario</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for client in clients %}
-                    <tr id="row-{{ client.serial }}" class="{{ 'highlight-row' if updated_serial == client.serial else '' }}">
+                    <tr id="row-{{ client.serial }}" class="client-row {{ 'highlight-row' if updated_serial == client.serial else '' }}" data-search="{{ (client.name ~ ' ' ~ client.serial ~ ' ' ~ client.email ~ ' ' ~ client.phone ~ ' ' ~ client.tier.badge)|lower }}">
                         <td>
                             <strong style="font-size:15px;">{{ client.name }}</strong>
-                            <small style="color: #AAA; margin-left:4px;">({{ client.serial }})</small>
+                            <span class="tier-badge" style="background:{{ client.tier.bg }}; color:{{ client.tier.fg }};">{{ client.tier.badge }}</span>
+                            <br>
+                            <small style="color: #AAA; font-family: monospace;">{{ client.serial }}</small>
                             <div class="meta-info">
                                 {% if client.email %}✉️ {{ client.email }}{% endif %}
                                 {% if client.phone %}<br>📱 {{ client.phone }}{% endif %}
@@ -271,7 +444,13 @@ BARISTA_HTML = """
                             <span class="sync-info">🔄 Sincronizado: {{ client.last_sync_at }}</span>
                             {% endif %}
                         </td>
-                        <td class="stamps">{{ client.stamps }} / 10</td>
+                        <td class="stamps">
+                            {{ client.stamps }} / 10
+                            <span class="visits-sub">☕️ {{ client.total_visits }} visitas totales</span>
+                            {% if client.redeemed_count > 0 %}
+                            <span class="visits-sub" style="color:#F5B041;">🎁 {{ client.redeemed_count }} canjeado(s)</span>
+                            {% endif %}
+                        </td>
                         <td class="actions-cell">
                             <form action="/api/add-stamp" method="POST" style="display:inline;">
                                 <input type="hidden" name="serial" value="{{ client.serial }}">
@@ -284,7 +463,7 @@ BARISTA_HTML = """
                                 <input type="hidden" name="action" value="sub">
                                 <button type="submit" class="btn-sub" title="Restar 1 sello">-1</button>
                             </form>
-                            <form action="/api/add-stamp" method="POST" style="display:inline;" onsubmit="return confirm('¿Canjear recompensa y reiniciar a 0 sellos para {{ client.name }}?');">
+                            <form action="/api/add-stamp" method="POST" style="display:inline;" onsubmit="return confirm('¿Canjear 1 Café Gratis y reiniciar a 0 sellos para {{ client.name }}?');">
                                 <input type="hidden" name="serial" value="{{ client.serial }}">
                                 <input type="hidden" name="action" value="reset">
                                 <button type="submit" class="btn-redeem" title="Canjear café gratis y reiniciar a 0">🎁 Canjear</button>
@@ -307,9 +486,133 @@ BARISTA_HTML = """
     </div>
 
     <script>
-        // Limpiar los parámetros ?ok=... de la URL para que no se queden pegados al recargar
+        // Limpiar los parámetros ?ok=... de la URL para que nunca se queden pegados al recargar
         if (window.history.replaceState && window.location.search) {
             window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        function setTemplate(text) {
+            const box = document.getElementById('push-msg-box');
+            if (box) {
+                box.value = text;
+                box.focus();
+            }
+        }
+
+        function filterClients() {
+            const q = (document.getElementById('client-search').value || '').toLowerCase().trim();
+            const rows = document.querySelectorAll('.client-row');
+            rows.forEach(row => {
+                const text = row.getAttribute('data-search') || '';
+                row.style.display = (!q || text.includes(q)) ? '' : 'none';
+            });
+        }
+
+        function detectMyGPS() {
+            if (!navigator.geolocation) {
+                alert('Tu navegador no soporta geolocalización.');
+                return;
+            }
+            navigator.geolocation.getCurrentPosition(
+                pos => {
+                    document.getElementById('lat-input').value = pos.coords.latitude.toFixed(6);
+                    document.getElementById('lng-input').value = pos.coords.longitude.toFixed(6);
+                },
+                err => {
+                    alert('No se pudo obtener la ubicación GPS: ' + err.message);
+                },
+                { enableHighAccuracy: true }
+            );
+        }
+
+        // Lógica de Escáner QR en vivo con cámara
+        let videoStream = null;
+        let scanning = false;
+
+        function playBeep() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, ctx.currentTime);
+                gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.12);
+            } catch (e) {}
+        }
+
+        async function toggleScanner() {
+            const box = document.getElementById('scanner-box');
+            const btn = document.getElementById('btn-toggle-cam');
+            const video = document.getElementById('qr-video');
+
+            if (scanning) {
+                stopScanner();
+                return;
+            }
+
+            try {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' }
+                });
+                video.srcObject = videoStream;
+                await video.play();
+                scanning = true;
+                box.style.display = 'block';
+                btn.textContent = '⏹️ Cerrar Cámara';
+                requestAnimationFrame(scanTick);
+            } catch (err) {
+                alert('No se pudo abrir la cámara (asegúrate de dar permiso a la cámara en Safari/Chrome): ' + err.message);
+            }
+        }
+
+        function stopScanner() {
+            scanning = false;
+            const box = document.getElementById('scanner-box');
+            const btn = document.getElementById('btn-toggle-cam');
+            if (videoStream) {
+                videoStream.getTracks().forEach(t => t.stop());
+                videoStream = null;
+            }
+            box.style.display = 'none';
+            btn.textContent = '📷 Abrir Cámara QR';
+        }
+
+        function scanTick() {
+            if (!scanning) return;
+            const video = document.getElementById('qr-video');
+            const canvas = document.getElementById('qr-canvas');
+            const status = document.getElementById('qr-status');
+
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                if (window.jsQR) {
+                    const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                        inversionAttempts: 'dontInvert'
+                    });
+                    if (code && code.data) {
+                        const detected = code.data.trim().toUpperCase();
+                        if (detected.startsWith('MAISHAS-')) {
+                            playBeep();
+                            status.textContent = '✅ Código detectado: ' + detected;
+                            document.getElementById('scan-serial-input').value = detected;
+                            stopScanner();
+                            if (document.getElementById('auto-stamp-check').checked) {
+                                document.getElementById('scan-form').submit();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            requestAnimationFrame(scanTick);
         }
     </script>
 </body>
@@ -317,7 +620,17 @@ BARISTA_HTML = """
 """
 
 
-def generate_signed_pkpass(serial_number, client_name, stamps_count, host_url, message=None, phone=None, birthdate=None):
+def generate_signed_pkpass(
+    serial_number,
+    client_name,
+    stamps_count,
+    host_url,
+    message=None,
+    phone=None,
+    birthdate=None,
+    total_visits=None,
+    redeemed_count=0
+):
     temp_dir = tempfile.mkdtemp(prefix=f"pass_{serial_number}_")
     try:
         for item in os.listdir(PASS_TEMPLATE_DIR):
@@ -332,14 +645,31 @@ def generate_signed_pkpass(serial_number, client_name, stamps_count, host_url, m
         with open(pass_json_path, "r", encoding="utf-8") as f:
             pass_data = json.load(f)
 
+        visits = total_visits if total_visits is not None else stamps_count
+        tier = get_vip_tier(visits)
+
         pass_data["serialNumber"] = serial_number
         pass_data["barcodes"][0]["message"] = serial_number
         pass_data["barcodes"][0]["altText"] = serial_number
         pass_data["storeCard"]["headerFields"][0]["value"] = f"{stamps_count} / 10"
         pass_data["storeCard"]["secondaryFields"][0]["value"] = client_name
 
+        # 🏆 Nivel de Socio VIP dinámico en primaryFields (con alerta cuando sube de nivel)
+        pass_data["storeCard"]["primaryFields"][0]["value"] = tier["name"]
+        pass_data["storeCard"]["primaryFields"][0]["changeMessage"] = "🏆 ¡Subiste de nivel en Maishas Café! Ahora eres: %@"
+
+        # 📍 Geolocalización inteligente: muestra la tarjeta en la pantalla bloqueada al pasar cerca
+        shop_loc = get_shop_location()
+        pass_data["locations"] = [
+            {
+                "latitude": shop_loc["lat"],
+                "longitude": shop_loc["lng"],
+                "relevantText": shop_loc["relevant_text"]
+            }
+        ]
+        pass_data["maxDistance"] = 150
+
         # 🔔 Configuración del Web Service para Notificaciones Push (APNs)
-        # Apple Wallet exige HTTPS para registrar el dispositivo y recibir actualizaciones
         clean_host = host_url.rstrip("/")
         if not ("localhost" in clean_host or "127.0.0.1" in clean_host):
             clean_host = clean_host.replace("http://", "https://", 1)
@@ -379,6 +709,13 @@ def generate_signed_pkpass(serial_number, client_name, stamps_count, host_url, m
             "changeMessage": "📣 %@"
         })
 
+        # 🏆 Historial de visitas y nivel VIP en el reverso
+        pass_data["storeCard"]["backFields"].insert(1, {
+            "key": "vipHistory",
+            "label": "Historial y Nivel de Socio",
+            "value": f"Nivel: {tier['name']} | Visitas históricas: {visits} | Cafés gratis canjeados: {redeemed_count} ({tier['next_goal']})"
+        })
+
         # Datos opcionales del socio en el reverso si fueron proporcionados
         extra_info = []
         if phone:
@@ -386,7 +723,7 @@ def generate_signed_pkpass(serial_number, client_name, stamps_count, host_url, m
         if birthdate:
             extra_info.append(f"Cumpleaños: {birthdate}")
         if extra_info:
-            pass_data["storeCard"]["backFields"].insert(1, {
+            pass_data["storeCard"]["backFields"].insert(2, {
                 "key": "memberDetails",
                 "label": "Datos del Cliente",
                 "value": " | ".join(extra_info)
@@ -452,7 +789,8 @@ def barista():
     c.execute("""
         SELECT c.serial, c.name, c.email, c.stamps, c.push_token, c.message,
                c.phone, c.birthdate, c.last_push_status, c.last_sync_at,
-               (SELECT COUNT(*) FROM registrations r WHERE r.serial = c.serial) as reg_count
+               (SELECT COUNT(*) FROM registrations r WHERE r.serial = c.serial) as reg_count,
+               c.total_visits, c.redeemed_count
         FROM clients c
         ORDER BY c.rowid DESC
     """)
@@ -461,16 +799,30 @@ def barista():
 
     clients = []
     installed_count = 0
+    gold_count = 0
+    silver_count = 0
+    total_redeemed = 0
+
     for r in rows:
         reg_count = r[10] or 0
         is_installed = bool(r[4]) or reg_count > 0
         if is_installed:
             installed_count += 1
+        stamps_val = r[3] or 0
+        visits_val = r[11] if r[11] is not None else stamps_val
+        redeemed_val = r[12] or 0
+        total_redeemed += redeemed_val
+        tier = get_vip_tier(visits_val)
+        if visits_val >= 25:
+            gold_count += 1
+        elif visits_val >= 10:
+            silver_count += 1
+
         clients.append({
             "serial": r[0],
             "name": r[1],
             "email": r[2],
-            "stamps": r[3] or 0,
+            "stamps": stamps_val,
             "push_token": r[4],
             "message": (r[5] or "").replace("\u200b", ""),
             "phone": r[6] or "",
@@ -479,12 +831,19 @@ def barista():
             "last_sync_at": r[9] or "",
             "device_count": max(reg_count, 1 if r[4] else 0),
             "is_installed": is_installed,
+            "total_visits": visits_val,
+            "redeemed_count": redeemed_val,
+            "tier": tier,
         })
 
     return render_template_string(
         BARISTA_HTML,
         clients=clients,
         installed_count=installed_count,
+        gold_count=gold_count,
+        silver_count=silver_count,
+        total_redeemed=total_redeemed,
+        shop_loc=get_shop_location(),
         ok=request.args.get("ok"),
         updated_serial=request.args.get("updated")
     )
@@ -502,8 +861,8 @@ def register():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, message, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
+        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at)
+           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)""",
         (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts)
     )
     conn.commit()
@@ -511,7 +870,8 @@ def register():
 
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
-        serial_number, name, 0, host_url, DEFAULT_MESSAGE, phone=phone, birthdate=birthdate
+        serial_number, name, 0, host_url, DEFAULT_MESSAGE,
+        phone=phone, birthdate=birthdate, total_visits=0, redeemed_count=0
     )
     safe_name = "".join(ch if ch.isalnum() else "_" for ch in name) or "Cliente"
     return send_file(
@@ -522,50 +882,112 @@ def register():
     )
 
 
-@app.route("/api/add-stamp", methods=["POST"])
-@requires_auth
-def add_stamp():
-    serial = request.form.get("serial")
-    action = request.form.get("action", "add")
-
+def _perform_stamp_update(serial, action="add"):
+    """Función auxiliar compartida entre el botón de la tabla y el escáner QR."""
+    serial_clean = (serial or "").strip().upper()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT serial, name, stamps FROM clients WHERE serial = ?", (serial,))
+    c.execute(
+        "SELECT serial, name, stamps, total_visits, redeemed_count FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    )
     client = c.fetchone()
 
     if not client:
         conn.close()
-        return redirect(url_for("barista", ok="⚠️ Cliente no encontrado"))
+        return None, f"⚠️ Código QR / Cliente '{serial_clean}' no encontrado"
 
-    serial_id, client_name, current_stamps = client[0], client[1], (client[2] or 0)
+    serial_id, client_name = client[0], client[1]
+    current_stamps = client[2] or 0
+    current_visits = client[3] if client[3] is not None else current_stamps
+    current_redeemed = client[4] or 0
 
     if action == "sub":
         new_stamps = max(0, current_stamps - 1)
+        new_visits = max(0, current_visits - 1)
+        new_redeemed = current_redeemed
         action_label = f"Sello restado a {client_name} ({serial_id}): {new_stamps}/10"
     elif action == "reset":
         new_stamps = 0
-        action_label = f"🎁 Recompensa canjeada para {client_name} ({serial_id}): reiniciado a 0/10"
+        new_visits = current_visits
+        new_redeemed = current_redeemed + 1
+        action_label = f"🎁 Café Gratis canjeado para {client_name} ({serial_id}): reiniciado a 0/10 (Total canjes: {new_redeemed})"
     else:
         if current_stamps >= 10:
             conn.close()
-            return redirect(url_for(
-                "barista",
-                ok=f"ℹ️ {client_name} ({serial_id}) ya tiene 10/10 sellos. Usa '🎁 Canjear' para reiniciar su tarjeta.",
-                updated=serial_id
-            ))
+            return serial_id, f"ℹ️ {client_name} ({serial_id}) ya tiene 10/10 sellos. Usa '🎁 Canjear' para entregar su café gratis."
         new_stamps = current_stamps + 1
-        action_label = f"✅ Sello agregado a {client_name} ({serial_id}): ahora tiene {new_stamps}/10"
+        new_visits = current_visits + 1
+        new_redeemed = current_redeemed
+        old_tier = get_vip_tier(current_visits)["name"]
+        new_tier = get_vip_tier(new_visits)["name"]
+        tier_note = f" — 🏆 ¡Subió a {new_tier}!" if new_tier != old_tier else ""
+        action_label = f"✅ Sello agregado a {client_name} ({serial_id}): ahora tiene {new_stamps}/10 ({new_visits} visitas){tier_note}"
 
     now_ts = get_utc_timestamp()
     c.execute(
-        "UPDATE clients SET stamps = ?, updated_at = ? WHERE serial = ?",
-        (new_stamps, now_ts, serial_id)
+        "UPDATE clients SET stamps = ?, total_visits = ?, redeemed_count = ?, updated_at = ? WHERE serial = ?",
+        (new_stamps, new_visits, new_redeemed, now_ts, serial_id)
     )
     conn.commit()
     conn.close()
 
     push_summary = send_apns_push_for_serial(serial_id)
-    return redirect(url_for("barista", ok=f"{action_label} — {push_summary}", updated=serial_id))
+    return serial_id, f"{action_label} — {push_summary}"
+
+
+@app.route("/api/add-stamp", methods=["POST"])
+@requires_auth
+def add_stamp():
+    serial = request.form.get("serial")
+    action = request.form.get("action", "add")
+    serial_id, msg = _perform_stamp_update(serial, action)
+    return redirect(url_for("barista", ok=msg, updated=serial_id))
+
+
+@app.route("/api/scan-action", methods=["POST"])
+@requires_auth
+def scan_action():
+    serial = request.form.get("serial")
+    action = request.form.get("action", "add")
+    serial_id, msg = _perform_stamp_update(serial, action)
+    return redirect(url_for("barista", ok=f"📷 QR Escaneado: {msg}", updated=serial_id))
+
+
+@app.route("/api/update-location", methods=["POST"])
+@requires_auth
+def update_location():
+    lat_raw = (request.form.get("lat") or "").strip()
+    lng_raw = (request.form.get("lng") or "").strip()
+    relevant_text = (request.form.get("relevant_text") or "").strip()[:160] or DEFAULT_GEO_TEXT
+    try:
+        lat = float(lat_raw)
+        lng = float(lng_raw)
+    except ValueError:
+        return redirect(url_for("barista", ok="⚠️ Latitud y Longitud deben ser números válidos (ej. 24.8049, -107.3940)"))
+
+    now_ts = get_utc_timestamp()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('shop_lat', ?)", (str(lat),))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('shop_lng', ?)", (str(lng),))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('shop_relevant_text', ?)", (relevant_text,))
+    # Actualizar timestamp de todos los clientes para que sus iPhones descarguen las nuevas coordenadas GPS
+    c.execute("UPDATE clients SET updated_at = ?", (now_ts,))
+    serials = [r[0] for r in c.execute("SELECT serial FROM clients").fetchall()]
+    conn.commit()
+    conn.close()
+
+    pushed = 0
+    for s in serials:
+        res = send_apns_push_for_serial(s)
+        if "200 OK" in res:
+            pushed += 1
+
+    return redirect(url_for(
+        "barista",
+        ok=f"📍 Ubicación GPS guardada ({lat:.5f}, {lng:.5f}) y enviada a {pushed} iPhone(s) activos"
+    ))
 
 
 @app.route("/api/delete-client", methods=["POST"])
@@ -707,7 +1129,7 @@ def get_updated_passes(device_id, pass_type_id):
     })
 
 
-# 4. Descarga del pase actualizado (el iPhone baja la versión nueva con los sellos/mensajes)
+# 4. Descarga del pase actualizado (el iPhone baja la versión nueva con los sellos/mensajes/nivel/GPS)
 @app.route("/v1/passes/<pass_type_id>/<serial_number>", methods=["GET"])
 def get_latest_pass(pass_type_id, serial_number):
     if not is_authorized():
@@ -715,7 +1137,7 @@ def get_latest_pass(pass_type_id, serial_number):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT name, stamps, message, phone, birthdate FROM clients WHERE serial = ?",
+        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count FROM clients WHERE serial = ?",
         (serial_number,)
     )
     client = c.fetchone()
@@ -728,9 +1150,10 @@ def get_latest_pass(pass_type_id, serial_number):
     conn.commit()
     conn.close()
 
-    name, stamps, message, phone, birthdate = client
+    name, stamps, message, phone, birthdate, total_visits, redeemed_count = client
     pkpass_path = generate_signed_pkpass(
-        serial_number, name, stamps or 0, request.host_url, message, phone=phone, birthdate=birthdate
+        serial_number, name, stamps or 0, request.host_url, message,
+        phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0
     )
     # conditional=False y Cache-Control: no-store garantizan que el iPhone siempre reciba HTTP 200 con el pase nuevo
     response = send_file(pkpass_path, mimetype="application/vnd.apple.pkpass", conditional=False, max_age=0)
@@ -776,7 +1199,6 @@ def send_apns_push_for_serial(serial):
             results.append(f"✅ 200 OK ({get_short_time()})")
         else:
             results.append(f"⚠️ Error {status_code}: {detail}")
-            # Si Apple reporta que el token ya no es válido (410 Unregistered), limpiarlo
             if status_code == 410 or "Unregistered" in detail or "BadDeviceToken" in detail:
                 c.execute("DELETE FROM registrations WHERE push_token = ? AND serial = ?", (token, serial))
 
@@ -797,7 +1219,6 @@ def send_apns_push(push_token):
                 "apns-topic": PASS_TYPE_ID,
                 "apns-priority": "10"
             }
-            # Wallet usa un payload vacío: despierta de inmediato al iPhone para que descargue el pase actualizado
             res = client.post(url, json={}, headers=headers)
             print(f"📡 Push APNs enviado a {push_token[:12]}... Status: {res.status_code} {res.text}")
             if res.status_code == 200:
@@ -821,6 +1242,7 @@ def diagnostics():
         "http2_support": False,
         "apns_connection": None,
         "pass_signing": False,
+        "geolocation": get_shop_location(),
         "database": {},
         "recent_wallet_logs": []
     }
@@ -830,17 +1252,14 @@ def diagnostics():
     except ImportError as e:
         report["http2_error"] = str(e)
 
-    # Probar firma de pase temporal
     try:
-        test_path = generate_signed_pkpass("MAISHAS-DIAG01", "Prueba Diag", 1, request.host_url, "Diagnóstico OK")
+        test_path = generate_signed_pkpass("MAISHAS-DIAG01", "Prueba Diag", 1, request.host_url, "Diagnóstico OK", total_visits=12)
         report["pass_signing"] = os.path.isfile(test_path) and os.path.getsize(test_path) > 1000
     except Exception as e:
         report["pass_signing_error"] = str(e)
 
-    # Probar conexión TLS HTTP/2 real con Apple APNs
     try:
         ok, code, detail = send_apns_push("0000000000000000000000000000000000000000000000000000000000000000")
-        # 400 BadDeviceToken confirma que Apple aceptó nuestro certificado SSL y nuestra conexión HTTP/2
         report["apns_connection"] = {
             "reachable_and_authenticated": code in (200, 400),
             "status_code": code,
