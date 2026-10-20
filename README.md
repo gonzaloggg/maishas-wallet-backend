@@ -186,5 +186,25 @@ sequenceDiagram
         ├── pass.json               # Estructura base, colores e identificadores de Apple
         ├── icon.png / icon@2x.png  # Ícono que aparece en las notificaciones Push en pantalla bloqueada
         ├── logo.png / logo@2x.png  # Logotipo superior izquierdo de la tarjeta
-        └── strip.png / strip@2x.png# Imagen central ilustrada de la tarjeta
+        └── strip.png / strip@2x.png# Imagen central ilustrada de la tarjeta (renderizada dinámicamente con Pillow)
 ```
+
+---
+
+## 🤖 8. Integración Completa para Celulares Android (`Android Wallet Digital`)
+
+El sistema ofrece **paridad funcional 100% entre iPhone (`Apple Wallet`) y celulares Android** sin requerir que el cliente instale aplicaciones externas de terceros:
+
+1. **Autodetección Inteligente en el Registro (`/`):**
+   * Detecta automáticamente si el cliente entra desde un **iPhone** (`iOS`) o desde un **Android** (`User-Agent`), permitiendo también cambiar manualmente con el selector superior (` iPhone` / `🤖 Android`).
+   * Si es **iPhone**, descarga e instala el pase firmado `.pkpass` nativo en Apple Wallet.
+   * Si es **Android**, redirige instantáneamente a su **Tarjeta Digital Interactiva Android (`/card/<serial>`)**.
+2. **Experiencia Visual Idéntica + Giro 3D + Instalación en Pantalla de Inicio (PWA):**
+   * Renderiza la misma estética *Luxury Coffee*, el **`strip.png` dinámico de 10 sellos generado en tiempo real con Pillow** (`/card/<serial>/strip.png`), sus niveles VIP (*Bronce*, *Plata*, *Oro VIP*) y su **código QR de alto contraste** (`/card/<serial>/qr.png`) listo para escanear en mostrador con la cámara del Barista (`jsQR`).
+   * Incluye giro interactivo 3D para consultar el reverso de la tarjeta y soporte **Web App Manifest (`/card/<serial>/manifest.webmanifest`) + Service Worker (`/sw.js`)** para instalarla como aplicación directa en la pantalla de inicio de Android.
+3. **Notificaciones Web Push Nativas (VAPID RFC 8291) + Sincronización en Tiempo Real (Live Sync):**
+   * Genera y persiste automáticamente un par de llaves criptográficas **ECDSA P-256 VAPID** en `/app/data/vapid_keys.json`.
+   * Cuando el Barista suma un sello (`+1`), canjea un café gratis (`🎁 Canjear`) o envía una campaña desde el Centro de Marketing / Radar de Cumpleaños, el motor unificado `send_apns_push_for_serial()` dispara simultáneamente:
+     * **Apple APNs HTTP/2** para dispositivos iPhone.
+     * **Web Push VAPID (`pywebpush`)** + **Live State Polling (`/api/android/state/<serial>`)** para dispositivos Android, haciendo vibrar el teléfono, mostrando un banner flotante en vivo y animando el nuevo sello sin recargar la página.
+

@@ -4,7 +4,11 @@ from functools import wraps
 from datetime import datetime, timezone, date
 from email.utils import formatdate, parsedate_to_datetime
 from PIL import Image, ImageDraw
-import os, json, hashlib, zipfile, subprocess, uuid, httpx, ssl, sqlite3, tempfile, shutil, math
+import os, io, json, base64, hashlib, zipfile, subprocess, uuid, httpx, ssl, sqlite3, tempfile, shutil, math
+import qrcode
+from py_vapid import Vapid01
+from pywebpush import webpush, WebPushException
+from cryptography.hazmat.primitives import serialization
 
 app = Flask(__name__)
 # Respetar los encabezados del túnel / proxy HTTPS (X-Forwarded-Proto / Host)
@@ -44,9 +48,10 @@ KEY_PEM = os.path.join(DATA_DIR, "key.pem")
 CERT_PEM = os.path.join(DATA_DIR, "cert.pem")
 WWDR_PEM = os.path.join(DATA_DIR, "wwdr.pem")
 DB_PATH = os.path.join(DATA_DIR, "loyalty.db")
+VAPID_FILE = os.path.join(DATA_DIR, "vapid_keys.json")
 
 
-# Auto-inyectar certificados desde Variables de Entorno en Railway
+# Auto-inyectar certificados Apple desde Variables de Entorno en Railway
 for env_var, file_path in [("ENV_KEY_PEM", KEY_PEM), ("ENV_CERT_PEM", CERT_PEM), ("ENV_WWDR_PEM", WWDR_PEM)]:
     val = os.environ.get(env_var)
     if val:
@@ -62,6 +67,34 @@ DEFAULT_LNG = -107.3940
 DEFAULT_GEO_TEXT = "☕️ ¡Estás cerca de Maishas Café! Pasa por tu café favorito y suma tu sello de hoy ✨"
 
 MESES_ES = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+
+def init_vapid_keys():
+    """Inicializa o carga las llaves VAPID (ECDSA P-256) para Notificaciones Web Push en Android."""
+    if os.path.isfile(VAPID_FILE):
+        try:
+            with open(VAPID_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("private_pem") and data.get("public_key"):
+                    return data["private_pem"], data["public_key"]
+        except Exception:
+            pass
+
+    v = Vapid01()
+    v.generate_keys()
+    priv_pem = v.private_pem().decode("utf-8")
+    raw_pub = v.public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint
+    )
+    pub_b64 = base64.urlsafe_b64encode(raw_pub).rstrip(b"=").decode("utf-8")
+    data = {"private_pem": priv_pem, "public_key": pub_b64}
+    with open(VAPID_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return priv_pem, pub_b64
+
+
+VAPID_PRIVATE_PEM, VAPID_PUBLIC_KEY = init_vapid_keys()
 
 
 def get_utc_timestamp():
@@ -150,7 +183,6 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
         try:
             return date(yr, m, d)
         except ValueError:
-            # Manejo de 29 de febrero en año no bisiesto -> 28 de febrero
             return date(yr, 2, 28)
 
     bday_this_year = _safe_date(today.year, month, day)
@@ -185,24 +217,19 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
     }
 
 
-def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
+def _create_dynamic_strip_pil(stamps_count):
     """
-    Genera dinámicamente strip.png (375x125) y strip@2x.png (750x250) con Pillow (PIL)
-    usando super-sampling 2x (1500x500) y filtro LANCZOS para bordes perfectamente suaves.
-    Dibuja una matriz Luxury Coffee de 10 sellos (2 filas de 5 nodos).
+    Crea el objeto PIL Image (1500x500 super-sampled) de la matriz Luxury Coffee de 10 sellos.
     """
     stamps = max(0, min(10, int(stamps_count or 0)))
     W, H = 1500, 500
     img = Image.new("RGB", (W, H), (18, 16, 14))
     draw = ImageDraw.Draw(img)
 
-    # 1. Fondo degradado cálido Espresso oscuro
     for y in range(H):
         t = y / float(H)
-        # Degradado sutil vertical con centro ligeramente más cálido
         mid = 1.0 - abs(t - 0.5) * 2.0
         if stamps >= 10:
-            # Estado celebración 10/10: resplandor cálido dorado en el fondo
             r = int(20 + 28 * mid)
             g = int(17 + 22 * mid)
             b = int(13 + 12 * mid)
@@ -212,13 +239,11 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
             b = int(12 + 9 * mid)
         draw.line([(0, y), (W, y)], fill=(r, g, b))
 
-    # 2. Marco perimetral estilo Luxury Card
     border_col = (212, 175, 55) if stamps >= 10 else (82, 68, 50)
     inner_border_col = (145, 118, 68) if stamps >= 10 else (50, 42, 33)
     draw.rounded_rectangle([24, 20, W - 25, H - 21], radius=36, outline=border_col, width=4)
     draw.rounded_rectangle([36, 32, W - 37, H - 33], radius=28, outline=inner_border_col, width=2)
 
-    # 3. Matriz de 10 Sellos (2 filas x 5 columnas)
     cols_x = [230, 490, 750, 1010, 1270]
     rows_y = [152, 348]
     radius = 68
@@ -232,7 +257,6 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
         is_tenth = (idx == 9)
 
         if is_earned:
-            # Halo exterior dorado suave
             halo_r = radius + 12
             draw.ellipse(
                 [cx - halo_r, cy - halo_r, cx + halo_r, cy + halo_r],
@@ -240,7 +264,6 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
                 outline=(110, 88, 44),
                 width=2
             )
-            # Círculo principal Dorado Champagne (#D4AF37)
             fill_gold = (232, 196, 96) if stamps >= 10 else (212, 175, 55)
             rim_gold = (248, 232, 176)
             draw.ellipse(
@@ -249,7 +272,6 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
                 outline=rim_gold,
                 width=5
             )
-            # Anillo interior oscuro sutil
             in_r = radius - 14
             draw.ellipse(
                 [cx - in_r, cy - in_r, cx + in_r, cy + in_r],
@@ -258,7 +280,6 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
             )
 
             if is_tenth:
-                # En el sello #10 completado dibujamos una estrella/corona de premio
                 pts = []
                 for i in range(10):
                     ang = -math.pi / 2 + i * (math.pi / 5)
@@ -266,19 +287,16 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
                     pts.append((cx + rad_p * math.cos(ang), cy + rad_p * math.sin(ang)))
                 draw.polygon(pts, fill=(22, 18, 15))
             else:
-                # Ícono minimalista de grano de café / taza en el centro
                 bean_rx, bean_ry = 20, 27
                 draw.ellipse(
                     [cx - bean_rx, cy - bean_ry, cx + bean_rx, cy + bean_ry],
                     fill=(24, 20, 16)
                 )
-                # Línea central del grano de café
                 draw.arc(
                     [cx - 14, cy - bean_ry + 3, cx + 18, cy + bean_ry - 3],
                     start=110, end=250, fill=fill_gold, width=5
                 )
         else:
-            # Sello pendiente: anillo translúcido elegante sobre fondo espresso
             bg_pending = (22, 19, 16)
             ring_color = (158, 130, 84) if is_tenth else (76, 64, 50)
             ring_width = 6 if is_tenth else 4
@@ -296,7 +314,6 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
             )
 
             if is_tenth:
-                # Estrella sutil en el nodo #10 indicando la recompensa final
                 pts = []
                 for i in range(10):
                     ang = -math.pi / 2 + i * (math.pi / 5)
@@ -304,17 +321,21 @@ def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
                     pts.append((cx + rad_p * math.cos(ang), cy + rad_p * math.sin(ang)))
                 draw.polygon(pts, outline=(158, 130, 84), fill=(42, 35, 26))
             else:
-                # Punto central minimalista
                 dot_r = 8
                 draw.ellipse(
                     [cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r],
                     fill=(66, 56, 44)
                 )
+    return img
 
-    # 4. Guardar strip@2x.png (750x250) y strip.png (375x125) con suavizado LANCZOS
+
+def render_dynamic_strip(stamps_count, output_dir, total_visits=0):
+    """
+    Guarda strip.png (375x125) y strip@2x.png (750x250) para Apple Wallet .pkpass.
+    """
+    img = _create_dynamic_strip_pil(stamps_count)
     img_2x = img.resize((750, 250), Image.Resampling.LANCZOS)
     img_1x = img.resize((375, 125), Image.Resampling.LANCZOS)
-
     img_2x.save(os.path.join(output_dir, "strip@2x.png"), format="PNG", optimize=True)
     img_1x.save(os.path.join(output_dir, "strip.png"), format="PNG", optimize=True)
 
@@ -337,10 +358,11 @@ def init_db():
             message TEXT,
             updated_at TEXT,
             last_push_status TEXT,
-            last_sync_at TEXT
+            last_sync_at TEXT,
+            platform TEXT DEFAULT 'ios',
+            android_active INTEGER DEFAULT 0
         )
     ''')
-    # Migraciones seguras para columnas nuevas en bases de datos existentes
     cols = [r[1] for r in c.execute("PRAGMA table_info(clients)")]
     migrations = [
         ("message", "ALTER TABLE clients ADD COLUMN message TEXT"),
@@ -350,6 +372,8 @@ def init_db():
         ("last_sync_at", "ALTER TABLE clients ADD COLUMN last_sync_at TEXT"),
         ("total_visits", "ALTER TABLE clients ADD COLUMN total_visits INTEGER DEFAULT 0"),
         ("redeemed_count", "ALTER TABLE clients ADD COLUMN redeemed_count INTEGER DEFAULT 0"),
+        ("platform", "ALTER TABLE clients ADD COLUMN platform TEXT DEFAULT 'ios'"),
+        ("android_active", "ALTER TABLE clients ADD COLUMN android_active INTEGER DEFAULT 0"),
     ]
     for col_name, sql in migrations:
         if col_name not in cols:
@@ -357,6 +381,7 @@ def init_db():
 
     c.execute("UPDATE clients SET total_visits = COALESCE(stamps, 0) WHERE total_visits IS NULL OR (total_visits = 0 AND stamps > 0)")
     c.execute("UPDATE clients SET redeemed_count = 0 WHERE redeemed_count IS NULL")
+    c.execute("UPDATE clients SET android_active = 0 WHERE android_active IS NULL")
     c.execute("UPDATE clients SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (get_utc_timestamp(),))
 
     c.execute('''
@@ -365,6 +390,16 @@ def init_db():
             push_token TEXT,
             serial TEXT,
             PRIMARY KEY (device_id, serial)
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS android_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            serial TEXT,
+            endpoint TEXT UNIQUE,
+            sub_json TEXT,
+            created_at TEXT
         )
     ''')
 
@@ -416,7 +451,7 @@ def get_shop_location():
 
 
 # ---------------------------------------------------------
-# PLANTILLA 1: PORTAL PÚBLICO DE REGISTRO (APPLE HIG LUXURY)
+# PLANTILLA 1: PORTAL PÚBLICO DE REGISTRO (iOS + ANDROID)
 # ---------------------------------------------------------
 REGISTRATION_HTML = """
 <!DOCTYPE html>
@@ -424,7 +459,7 @@ REGISTRATION_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Maishas Café — Club de Fidelización Apple Wallet</title>
+    <title>Maishas Café — Club de Fidelización Digital</title>
     <style>
         :root {
             --bg-deep: #0D0C0B;
@@ -435,10 +470,11 @@ REGISTRATION_HTML = """
             --text-muted: #A39B90;
             --border-glass: rgba(255, 255, 255, 0.09);
             --rose: #FF375F;
+            --android-green: #3DDC84;
         }
         * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Roboto", sans-serif;
             background-color: var(--bg-deep);
             background-image:
                 radial-gradient(circle at 50% 0%, rgba(212, 175, 55, 0.16) 0%, transparent 55%),
@@ -456,11 +492,9 @@ REGISTRATION_HTML = """
             max-width: 440px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            gap: 18px;
         }
-        .brand-header {
-            text-align: center;
-        }
+        .brand-header { text-align: center; }
         .brand-pill {
             display: inline-flex;
             align-items: center;
@@ -474,29 +508,59 @@ REGISTRATION_HTML = """
             font-weight: 600;
             letter-spacing: 0.6px;
             text-transform: uppercase;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
         .brand-header h1 {
             margin: 0;
             font-size: 28px;
             font-weight: 700;
             letter-spacing: -0.5px;
-            color: var(--text-primary);
         }
         .brand-header p {
-            margin: 6px 0 0;
-            font-size: 14px;
+            margin: 5px 0 0;
+            font-size: 13.5px;
             color: var(--text-muted);
         }
 
-        /* Previsualización Interactiva de la Tarjeta Apple Wallet */
+        /* Selector de Plataforma iPhone / Android */
+        .platform-switcher {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            background: rgba(18, 16, 14, 0.9);
+            border: 1px solid var(--border-glass);
+            border-radius: 14px;
+            padding: 4px;
+            gap: 4px;
+        }
+        .plat-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .plat-btn.active {
+            background: rgba(212, 175, 55, 0.18);
+            color: var(--gold-light);
+            border: 1px solid rgba(212, 175, 55, 0.4);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+        }
+
+        /* Previsualización Interactiva de la Tarjeta */
         .wallet-preview {
             background: linear-gradient(165deg, #1A1714 0%, #110F0D 100%);
             border-radius: 20px;
             border: 1px solid rgba(212, 175, 55, 0.32);
             box-shadow: 0 20px 45px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.12);
             overflow: hidden;
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
         }
         .wp-header {
             padding: 14px 18px;
@@ -511,7 +575,6 @@ REGISTRATION_HTML = """
             font-weight: 700;
             font-size: 13px;
             letter-spacing: 0.8px;
-            color: var(--text-primary);
         }
         .wp-logo-icon {
             width: 24px;
@@ -538,9 +601,7 @@ REGISTRATION_HTML = """
         .wp-stamps-top .val {
             font-size: 15px;
             font-weight: 700;
-            color: var(--text-primary);
         }
-        /* Strip visual con los 10 sellos */
         .wp-strip {
             background: radial-gradient(circle at 50% 50%, #241E18 0%, #12100E 100%);
             border-top: 1px solid rgba(198, 166, 117, 0.2);
@@ -592,27 +653,22 @@ REGISTRATION_HTML = """
         .wp-field .val {
             font-size: 12px;
             font-weight: 600;
-            color: var(--text-primary);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             display: block;
         }
 
-        /* Tarjeta Glassmorphic del Formulario */
         .form-card {
             background: var(--bg-surface);
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border: 1px solid var(--border-glass);
             border-radius: 24px;
-            padding: 26px 22px;
+            padding: 24px 22px;
             box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
         }
-        .field-group {
-            margin-bottom: 15px;
-            text-align: left;
-        }
+        .field-group { margin-bottom: 14px; text-align: left; }
         .field-label {
             display: flex;
             justify-content: space-between;
@@ -639,18 +695,13 @@ REGISTRATION_HTML = """
             color: var(--text-primary);
             font-size: 16px;
             font-family: inherit;
-            transition: all 0.2s ease;
         }
-        input::placeholder { color: rgba(163, 155, 144, 0.55); }
         input:focus {
             outline: none;
             border-color: var(--gold);
             box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.2);
-            background: rgba(18, 16, 14, 0.95);
         }
-        input[type="date"] {
-            color-scheme: dark;
-        }
+        input[type="date"] { color-scheme: dark; }
         .bday-incentive {
             margin-top: 6px;
             display: flex;
@@ -663,7 +714,7 @@ REGISTRATION_HTML = """
             padding: 7px 11px;
             border-radius: 10px;
         }
-        .btn-apple-wallet {
+        .btn-submit-wallet {
             width: 100%;
             margin-top: 8px;
             padding: 15px 18px;
@@ -673,23 +724,18 @@ REGISTRATION_HTML = """
             color: #12100E;
             font-size: 16px;
             font-weight: 700;
-            letter-spacing: -0.2px;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
             box-shadow: 0 8px 24px rgba(212, 175, 55, 0.3);
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-        }
-        .btn-apple-wallet:active {
-            transform: scale(0.98);
         }
         .safari-hint {
             text-align: center;
             font-size: 12px;
             color: var(--text-muted);
-            margin-top: 14px;
+            margin-top: 12px;
             margin-bottom: 0;
         }
     </style>
@@ -699,11 +745,21 @@ REGISTRATION_HTML = """
         <div class="brand-header">
             <span class="brand-pill">☕️ Maishas Loyalty Club</span>
             <h1>Maishas Café</h1>
-            <p>Tu membresía digital interactiva en Apple Wallet</p>
+            <p>Tu membresía digital interactiva en iPhone y Android</p>
         </div>
 
-        <!-- Previsualización en Vivo estilo Apple Wallet -->
-        <div class="wallet-preview" aria-label="Vista previa de tu tarjeta">
+        <!-- Selector Inteligente iPhone / Android -->
+        <div class="platform-switcher" role="tablist">
+            <button type="button" id="btn-plat-ios" class="plat-btn active" onclick="setPlatform('ios')">
+                <span> iPhone · Apple Wallet</span>
+            </button>
+            <button type="button" id="btn-plat-android" class="plat-btn" onclick="setPlatform('android')">
+                <span>🤖 Android · Wallet Digital</span>
+            </button>
+        </div>
+
+        <!-- Previsualización en Vivo -->
+        <div class="wallet-preview">
             <div class="wp-header">
                 <div class="wp-logo">
                     <span class="wp-logo-icon">☕️</span>
@@ -711,7 +767,7 @@ REGISTRATION_HTML = """
                 </div>
                 <div class="wp-stamps-top">
                     <span class="lbl">SELLOS</span>
-                    <span class="val">1 / 10</span>
+                    <span class="val">0 / 10</span>
                 </div>
             </div>
             <div class="wp-strip">
@@ -745,17 +801,15 @@ REGISTRATION_HTML = """
         <!-- Formulario de Registro -->
         <div class="form-card">
             <form action="/api/register" method="POST">
+                <input type="hidden" name="platform" id="platform-input" value="ios">
+
                 <div class="field-group">
-                    <label class="field-label">
-                        <span>Nombre y Apellido</span>
-                    </label>
-                    <input type="text" name="name" id="name-input" placeholder="Ej. Ana Sofía López" required oninput="updateCardPreview(this.value)">
+                    <label class="field-label"><span>Nombre y Apellido</span></label>
+                    <input type="text" name="name" placeholder="Ej. Ana Sofía López" required oninput="updateCardPreview(this.value)">
                 </div>
 
                 <div class="field-group">
-                    <label class="field-label">
-                        <span>Correo Electrónico</span>
-                    </label>
+                    <label class="field-label"><span>Correo Electrónico</span></label>
                     <input type="email" name="email" placeholder="tu@correo.com" required>
                 </div>
 
@@ -775,15 +829,15 @@ REGISTRATION_HTML = """
                     <input type="date" name="birthdate">
                     <div class="bday-incentive">
                         <span>🎁</span>
-                        <span>Recibe un regalo especial en tu Apple Wallet el día de tu cumpleaños</span>
+                        <span>Recibe un regalo especial en tu Wallet el día de tu cumpleaños</span>
                     </div>
                 </div>
 
-                <button type="submit" class="btn-apple-wallet">
+                <button type="submit" id="submit-wallet-btn" class="btn-submit-wallet">
                     <span> Agregar a Apple Wallet</span>
                 </button>
             </form>
-            <p class="safari-hint">Ábrelo desde <strong>Safari en tu iPhone</strong> para instalar tu pase con un toque.</p>
+            <p class="safari-hint" id="platform-hint">Compatible con <strong>Apple Wallet (iPhone)</strong> y <strong>Android Wallet Digital</strong> con notificaciones Push.</p>
         </div>
     </div>
 
@@ -793,6 +847,26 @@ REGISTRATION_HTML = """
             const clean = (val || '').trim();
             el.textContent = clean ? clean : 'Tu Nombre Aquí';
         }
+
+        function setPlatform(plat) {
+            document.getElementById('platform-input').value = plat;
+            document.getElementById('btn-plat-ios').classList.toggle('active', plat === 'ios');
+            document.getElementById('btn-plat-android').classList.toggle('active', plat === 'android');
+            const btn = document.getElementById('submit-wallet-btn');
+            const hint = document.getElementById('platform-hint');
+            if (plat === 'android') {
+                btn.innerHTML = '<span>🤖 Abrir mi Tarjeta en Android Wallet 📲</span>';
+                hint.innerHTML = 'Se abrirá tu <strong>Tarjeta Interactiva Android</strong> con notificaciones Push y acceso directo.';
+            } else {
+                btn.innerHTML = '<span> Agregar a Apple Wallet</span>';
+                hint.innerHTML = 'Ábrelo desde <strong>Safari en tu iPhone</strong> para instalar tu pase con un toque.';
+            }
+        }
+
+        // Auto-detectar Android vs iPhone al abrir la página
+        if (/Android/i.test(navigator.userAgent || '')) {
+            setPlatform('android');
+        }
     </script>
 </body>
 </html>
@@ -800,7 +874,627 @@ REGISTRATION_HTML = """
 
 
 # ---------------------------------------------------------
-# PLANTILLA 2: PANEL DEL BARISTA (APPLE HIG POS — iPadOS / macOS Sequoia)
+# PLANTILLA 2: TARJETA DIGITAL INTERACTIVA ANDROID (PWA + WEB PUSH + LIVE SYNC + GPS)
+# ---------------------------------------------------------
+ANDROID_CARD_HTML = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#12100E">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/card/{{ client.serial }}/manifest.webmanifest">
+    <link rel="icon" type="image/png" href="/card/icon-192.png">
+    <title>Maishas Café — Tarjeta {{ client.name }}</title>
+    <style>
+        :root {
+            --bg-deep: #0D0C0B;
+            --card-bg: #12100E;
+            --gold: #D4AF37;
+            --gold-light: #E6C280;
+            --label-gold: #C6A675;
+            --text-cream: #F5F2EB;
+            --text-muted: #A39B90;
+            --apple-green: #30D158;
+        }
+        * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Roboto", "SF Pro Display", sans-serif;
+            font-variant-numeric: tabular-nums;
+            background-color: var(--bg-deep);
+            background-image: radial-gradient(circle at 50% 0%, rgba(212, 175, 55, 0.14) 0%, transparent 60%);
+            color: var(--text-cream);
+            margin: 0;
+            padding: 16px 14px 48px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Banner de Notificación Push en Vivo (Estilo Lock Screen / Heads-up) */
+        .push-banner {
+            position: fixed;
+            top: 14px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-150%);
+            z-index: 9999;
+            width: 94%;
+            max-width: 420px;
+            background: rgba(24, 21, 18, 0.96);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(212, 175, 55, 0.55);
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.85), 0 0 25px rgba(212, 175, 55, 0.25);
+            border-radius: 18px;
+            padding: 13px 15px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .push-banner.show {
+            transform: translateX(-50%) translateY(0);
+        }
+        .pb-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #D4AF37, #8F6B1A);
+            color: #12100E;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 19px;
+            flex-shrink: 0;
+        }
+        .pb-content { flex: 1; min-width: 0; }
+        .pb-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--gold-light);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            display: flex;
+            justify-content: space-between;
+        }
+        .pb-body {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--text-cream);
+            margin-top: 2px;
+            line-height: 1.35;
+        }
+
+        /* Barra Superior de Estado Wallet */
+        .wallet-top-bar {
+            width: 100%;
+            max-width: 410px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding: 0 4px;
+        }
+        .sync-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11.5px;
+            font-weight: 600;
+            color: #4AE072;
+            background: rgba(48, 209, 88, 0.12);
+            border: 1px solid rgba(48, 209, 88, 0.3);
+            padding: 5px 11px;
+            border-radius: 99px;
+        }
+        .sync-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #30D158;
+            box-shadow: 0 0 8px #30D158;
+            animation: blinkDot 2s infinite;
+        }
+        @keyframes blinkDot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+        .btn-flip {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: var(--text-cream);
+            border-radius: 99px;
+            padding: 6px 13px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        /* Tarjeta Principal Estilo PassKit (Frente y Reverso) */
+        .pass-card {
+            width: 100%;
+            max-width: 410px;
+            background: linear-gradient(170deg, #181512 0%, #100E0C 100%);
+            border-radius: 24px;
+            border: 1px solid rgba(212, 175, 55, 0.38);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+            overflow: hidden;
+            position: relative;
+        }
+        .pass-header {
+            padding: 16px 20px 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .pass-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 800;
+            font-size: 14px;
+            letter-spacing: 0.8px;
+        }
+        .pass-brand img {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+        }
+        .pass-header-field {
+            text-align: right;
+        }
+        .ph-lbl {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--label-gold);
+            letter-spacing: 0.8px;
+            display: block;
+        }
+        .ph-val {
+            font-size: 19px;
+            font-weight: 800;
+            color: var(--text-cream);
+        }
+
+        /* Strip Dinámico Generado con Pillow */
+        .pass-strip-wrap {
+            width: 100%;
+            background: #12100E;
+            border-top: 1px solid rgba(198, 166, 117, 0.18);
+            border-bottom: 1px solid rgba(198, 166, 117, 0.18);
+            line-height: 0;
+        }
+        .pass-strip-wrap img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        /* Campos Secundarios y Auxiliares */
+        .pass-fields-grid {
+            padding: 15px 20px 10px;
+            display: grid;
+            grid-template-columns: 1.25fr 1.1fr 1fr;
+            gap: 10px;
+        }
+        .p-field .lbl {
+            font-size: 9.5px;
+            font-weight: 700;
+            color: var(--label-gold);
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            display: block;
+            margin-bottom: 3px;
+        }
+        .p-field .val {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-cream);
+            display: block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .pass-promo-row {
+            padding: 8px 20px 14px;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+        }
+        .pass-promo-row .lbl {
+            font-size: 9.5px;
+            font-weight: 700;
+            color: var(--label-gold);
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            display: block;
+            margin-bottom: 3px;
+        }
+        .pass-promo-row .val {
+            font-size: 13px;
+            color: var(--gold-light);
+            font-weight: 500;
+            line-height: 1.35;
+        }
+
+        /* Zona de Código QR de Alto Contraste para Escáner Mostrador */
+        .pass-qr-zone {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .qr-white-box {
+            background: #FFFFFF;
+            padding: 12px;
+            border-radius: 16px;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+            display: inline-block;
+        }
+        .qr-white-box img {
+            width: 168px;
+            height: 168px;
+            display: block;
+        }
+        .qr-alt-text {
+            margin-top: 8px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12.5px;
+            color: var(--text-muted);
+            letter-spacing: 1px;
+        }
+
+        /* Reverso de la Tarjeta (Detalles del Pase) */
+        .pass-back-view {
+            display: none;
+            padding: 20px;
+        }
+        .back-section {
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .back-section:last-child { border-bottom: none; }
+        .back-lbl {
+            font-size: 10.5px;
+            font-weight: 700;
+            color: var(--label-gold);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        .back-val {
+            font-size: 13.5px;
+            color: var(--text-cream);
+            line-height: 1.45;
+        }
+
+        /* Botones de Acción Android (Notificaciones Push e Instalar en Inicio) */
+        .android-actions-stack {
+            width: 100%;
+            max-width: 410px;
+            margin-top: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .btn-action-gold {
+            width: 100%;
+            padding: 14px 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: linear-gradient(135deg, #D4AF37 0%, #B38A22 100%);
+            color: #12100E;
+            font-size: 14.5px;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 8px 22px rgba(212, 175, 55, 0.25);
+        }
+        .btn-action-glass {
+            width: 100%;
+            padding: 13px 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-cream);
+            font-size: 13.5px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Banner de Notificación Push en Vivo -->
+    <div class="push-banner" id="live-push-banner">
+        <div class="pb-icon">☕️</div>
+        <div class="pb-content">
+            <div class="pb-title">
+                <span>MAISHAS CAFÉ</span>
+                <span>ahora</span>
+            </div>
+            <div class="pb-body" id="live-push-text">¡Tarjeta sincronizada!</div>
+        </div>
+    </div>
+
+    <!-- Barra Superior -->
+    <div class="wallet-top-bar">
+        <div class="sync-badge">
+            <span class="sync-dot"></span>
+            <span id="sync-status-label">🤖 Android Wallet Activo</span>
+        </div>
+        <button type="button" class="btn-flip" id="btn-flip-toggle" onclick="toggleBackView()">
+            ⓘ Detalles / Reverso
+        </button>
+    </div>
+
+    <!-- TARJETA DIGITAL INTERACTIVA -->
+    <div class="pass-card">
+        <!-- VISTA FRONTAL -->
+        <div id="pass-front-view">
+            <div class="pass-header">
+                <div class="pass-brand">
+                    <img src="/card/icon-192.png" alt="Maishas">
+                    <span>MAISHAS CAFÉ</span>
+                </div>
+                <div class="pass-header-field">
+                    <span class="ph-lbl">SELLOS</span>
+                    <span class="ph-val" id="val-stamps">{{ client.stamps }} / 10</span>
+                </div>
+            </div>
+
+            <div class="pass-strip-wrap">
+                <img id="card-strip-img" src="/card/{{ client.serial }}/strip.png?v={{ client.updated_at }}" alt="Sellos Maishas Café">
+            </div>
+
+            <div class="pass-fields-grid">
+                <div class="p-field">
+                    <span class="lbl">CLIENTE</span>
+                    <span class="val" id="val-name">{{ client.name }}</span>
+                </div>
+                <div class="p-field">
+                    <span class="lbl">NIVEL VIP</span>
+                    <span class="val" id="val-tier">{{ client.tier.name }}</span>
+                </div>
+                <div class="p-field" style="text-align:right;">
+                    <span class="lbl">PREMIO</span>
+                    <span class="val" id="val-reward">{{ client.reward_status }}</span>
+                </div>
+            </div>
+
+            <div class="pass-promo-row">
+                <span class="lbl">AVISO MAISHAS</span>
+                <span class="val" id="val-promo">{{ client.message }}</span>
+            </div>
+
+            <div class="pass-qr-zone">
+                <div class="qr-white-box">
+                    <img src="/card/{{ client.serial }}/qr.png" alt="QR {{ client.serial }}">
+                </div>
+                <div class="qr-alt-text">{{ client.serial }}</div>
+            </div>
+        </div>
+
+        <!-- VISTA REVERSO (DETALLES DEL PASE) -->
+        <div id="pass-back-view" class="pass-back-view">
+            <div class="back-section">
+                <div class="back-lbl">Mensaje de Maishas Café</div>
+                <div class="back-val" id="back-val-msg">{{ client.message }}</div>
+            </div>
+            <div class="back-section">
+                <div class="back-lbl">Historial y Nivel de Socio</div>
+                <div class="back-val" id="back-val-history">
+                    Nivel: {{ client.tier.name }} | Visitas históricas: {{ client.total_visits }} | Cafés gratis canjeados: {{ client.redeemed_count }} ({{ client.tier.next_goal }})
+                </div>
+            </div>
+            {% if client.phone or client.birthdate %}
+            <div class="back-section">
+                <div class="back-lbl">Datos del Socio</div>
+                <div class="back-val">
+                    {% if client.phone %}Celular: {{ client.phone }}{% endif %}
+                    {% if client.phone and client.birthdate %} | {% endif %}
+                    {% if client.birthdate %}Cumpleaños: {{ client.birthdate }}{% endif %}
+                </div>
+            </div>
+            {% endif %}
+            <div class="back-section">
+                <div class="back-lbl">📍 Ubicación y Alertas de Proximidad</div>
+                <div class="back-val">{{ shop_loc.relevant_text }}</div>
+            </div>
+            <div class="back-section">
+                <div class="back-lbl">Términos y Condiciones</div>
+                <div class="back-val">Acumula 1 sello por cada compra de café. Al completar 10 sellos, obtén un café de cualquier tamaño totalmente gratis. Válido en sucursal Maishas Café (@maishascafe).</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BOTONES DE ACCIÓN EN ANDROID / MULTIPLATAFORMA -->
+    <div class="android-actions-stack">
+        <button type="button" id="btn-enable-push" class="btn-action-gold" onclick="enableAndroidPush()">
+            <span>🔔 Activar Notificaciones Push en mi Celular</span>
+        </button>
+
+        <button type="button" id="btn-install-pwa" class="btn-action-glass" style="display:none;" onclick="installPWA()">
+            <span>📲 Instalar Tarjeta en Pantalla de Inicio</span>
+        </button>
+
+        <a href="/card/{{ client.serial }}/download.pkpass" class="btn-action-glass">
+            <span> Descargar también para Apple Wallet (.pkpass)</span>
+        </a>
+    </div>
+
+    <script>
+        const SERIAL = "{{ client.serial }}";
+        const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
+        const SHOP_LAT = {{ shop_loc.lat }};
+        const SHOP_LNG = {{ shop_loc.lng }};
+        const SHOP_GEO_TEXT = {{ shop_loc.relevant_text | tojson }};
+
+        let currentUpdatedAt = {{ client.updated_at | tojson }};
+        let currentStamps = {{ client.stamps }};
+        let currentMessage = {{ client.message | tojson }};
+        let currentTier = {{ client.tier.name | tojson }};
+        let showingBack = false;
+
+        function toggleBackView() {
+            showingBack = !showingBack;
+            document.getElementById('pass-front-view').style.display = showingBack ? 'none' : 'block';
+            document.getElementById('pass-back-view').style.display = showingBack ? 'block' : 'none';
+            document.getElementById('btn-flip-toggle').textContent = showingBack ? '← Volver al Frente' : 'ⓘ Detalles / Reverso';
+        }
+
+        function showLiveBanner(text) {
+            const banner = document.getElementById('live-push-banner');
+            document.getElementById('live-push-text').textContent = text;
+            banner.classList.add('show');
+            try {
+                if (navigator.vibrate) navigator.vibrate([120, 60, 180]);
+            } catch (e) {}
+            setTimeout(() => {
+                banner.classList.remove('show');
+            }, 6000);
+        }
+
+        // 1. Registrar latido / instalación activa en Android automáticamente
+        async function registerAndroidHeartbeat() {
+            try {
+                await fetch(`/api/android/heartbeat/${SERIAL}`, { method: 'POST' });
+            } catch (e) {}
+        }
+        registerAndroidHeartbeat();
+
+        // 2. Sincronización en tiempo real cada 3.5 segundos (actualiza sellos, strip.png y avisos al instante)
+        async function pollCardState() {
+            try {
+                const res = await fetch(`/api/android/state/${SERIAL}?t=${Date.now()}`, { cache: 'no-store' });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.updated_at && data.updated_at !== currentUpdatedAt) {
+                    const prevStamps = currentStamps;
+                    const prevMsg = currentMessage;
+                    const prevTier = currentTier;
+
+                    currentUpdatedAt = data.updated_at;
+                    currentStamps = data.stamps;
+                    currentMessage = data.message;
+                    currentTier = data.tier_name;
+
+                    // Actualizar textos e imagen dinámica strip.png
+                    document.getElementById('val-stamps').textContent = `${data.stamps} / 10`;
+                    document.getElementById('val-tier').textContent = data.tier_name;
+                    document.getElementById('val-reward').textContent = data.reward_status;
+                    document.getElementById('val-promo').textContent = data.message;
+                    document.getElementById('back-val-msg').textContent = data.message;
+                    document.getElementById('back-val-history').textContent = data.history_text;
+                    document.getElementById('card-strip-img').src = `/card/${SERIAL}/strip.png?v=${encodeURIComponent(data.updated_at)}`;
+
+                    // Mostrar alerta estilo pantalla bloqueada según el cambio
+                    if (data.stamps !== prevStamps) {
+                        if (data.stamps >= 10) {
+                            showLiveBanner(`🎉 ¡Felicidades! Completaste 10/10 sellos. ¡Tienes 1 Café Gratis disponible!`);
+                        } else if (data.stamps === 0) {
+                            showLiveBanner(`🎁 ¡Recompensa canjeada! Tu tarjeta se ha reiniciado a 0 / 10.`);
+                        } else {
+                            showLiveBanner(`☕️ ¡Has ganado 1 nuevo sello en Maishas Café! Total: ${data.stamps} / 10`);
+                        }
+                    } else if (data.tier_name !== prevTier) {
+                        showLiveBanner(`🏆 ¡Subiste de nivel en Maishas Café! Ahora eres: ${data.tier_name}`);
+                    } else if (data.message !== prevMsg) {
+                        showLiveBanner(`📣 ${data.message}`);
+                    } else {
+                        showLiveBanner(`✨ Tu tarjeta Maishas Café se ha actualizado.`);
+                    }
+                }
+            } catch (e) {}
+        }
+        setInterval(pollCardState, 3500);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) pollCardState();
+        });
+
+        // 3. Web Push (VAPID) + Service Worker para recibir notificaciones incluso con el navegador cerrado
+        function urlBase64ToUint8Array(base64String) {
+            const padding = '='.repeat((4 - base64String.length % 4) % 4);
+            const base64 = (base64String + padding).replace(/\\-/g, '+').replace(/_/g, '/');
+            const rawData = window.atob(base64);
+            const outputArray = new Uint8Array(rawData.length);
+            for (let i = 0; i < rawData.length; ++i) {
+                outputArray[i] = rawData.charCodeAt(i);
+            }
+            return outputArray;
+        }
+
+        async function enableAndroidPush() {
+            const btn = document.getElementById('btn-enable-push');
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+                showLiveBanner('✅ Sincronización automática en vivo activada en tu navegador.');
+                return;
+            }
+            try {
+                const perm = await Notification.requestPermission();
+                if (perm !== 'granted') {
+                    alert('Por favor permite las notificaciones en tu navegador para recibir alertas de sellos y promociones.');
+                    return;
+                }
+                const reg = await navigator.serviceWorker.register('/sw.js');
+                await navigator.serviceWorker.ready;
+                const sub = await reg.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+                });
+                await fetch(`/api/android/subscribe/${SERIAL}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ subscription: sub.toJSON() })
+                });
+                btn.innerHTML = '<span>✅ Notificaciones Push Activadas en este Android</span>';
+                btn.style.background = 'rgba(48, 209, 88, 0.2)';
+                btn.style.color = '#4AE072';
+                btn.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+                showLiveBanner('🔔 ¡Notificaciones Push activadas! Recibirás alertas de tus sellos y promociones.');
+            } catch (err) {
+                showLiveBanner('✅ Tarjeta vinculada y sincronizada en tiempo real.');
+            }
+        }
+
+        // Si ya dio permiso antes, registrar Service Worker silenciosamente
+        if ('serviceWorker' in navigator && 'Notification' in window && Notification.permission === 'granted') {
+            enableAndroidPush();
+        }
+
+        // 4. Instalación PWA ("Agregar a Pantalla de Inicio" en Android)
+        let deferredPrompt = null;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            document.getElementById('btn-install-pwa').style.display = 'flex';
+        });
+
+        async function installPWA() {
+            if (!deferredPrompt) return;
+            deferredPrompt.prompt();
+            await deferredPrompt.userChoice;
+            deferredPrompt = null;
+            document.getElementById('btn-install-pwa').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------
+# PLANTILLA 3: PANEL DEL BARISTA (APPLE HIG POS — iOS + ANDROID)
 # ---------------------------------------------------------
 BARISTA_HTML = """
 <!DOCTYPE html>
@@ -841,7 +1535,6 @@ BARISTA_HTML = """
             min-height: 100vh;
         }
 
-        /* Dynamic Island Toast Notification */
         .dynamic-island-wrap {
             position: fixed;
             top: 14px;
@@ -849,7 +1542,7 @@ BARISTA_HTML = """
             transform: translateX(-50%);
             z-index: 9999;
             width: 92%;
-            max-width: 620px;
+            max-width: 640px;
             pointer-events: none;
         }
         .dynamic-island {
@@ -897,7 +1590,6 @@ BARISTA_HTML = """
             flex-shrink: 0;
         }
 
-        /* Sticky Glass Header */
         .sticky-header {
             position: sticky;
             top: 0;
@@ -917,11 +1609,7 @@ BARISTA_HTML = """
             gap: 16px;
             flex-wrap: wrap;
         }
-        .brand-Cluster {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
+        .brand-Cluster { display: flex; align-items: center; gap: 12px; }
         .brand-emblem {
             width: 38px;
             height: 38px;
@@ -934,27 +1622,10 @@ BARISTA_HTML = """
             font-size: 20px;
             box-shadow: 0 4px 14px rgba(212, 175, 55, 0.25);
         }
-        .brand-title {
-            font-size: 18px;
-            font-weight: 700;
-            letter-spacing: -0.3px;
-            margin: 0;
-        }
-        .brand-sub {
-            font-size: 11px;
-            color: var(--gold-light);
-            font-weight: 600;
-            letter-spacing: 0.4px;
-            text-transform: uppercase;
-        }
+        .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; margin: 0; }
+        .brand-sub { font-size: 11px; color: var(--gold-light); font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; }
 
-        /* KPI Pills in Header */
-        .kpi-cluster {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
+        .kpi-cluster { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .kpi-pill {
             background: var(--bg-glass-subtle);
             border: 1px solid var(--border-subtle);
@@ -966,11 +1637,7 @@ BARISTA_HTML = """
             align-items: center;
             gap: 6px;
         }
-        .kpi-pill strong {
-            color: var(--text-primary);
-            font-size: 13.5px;
-            font-weight: 700;
-        }
+        .kpi-pill strong { color: var(--text-primary); font-size: 13.5px; font-weight: 700; }
         .kpi-pill.kpi-bday {
             border-color: rgba(255, 55, 95, 0.35);
             background: rgba(255, 55, 95, 0.1);
@@ -979,13 +1646,7 @@ BARISTA_HTML = """
         }
         .kpi-pill.kpi-bday strong { color: #FF375F; }
 
-        /* Spotlight Search in Header */
-        .spotlight-wrap {
-            position: relative;
-            min-width: 260px;
-            flex: 1;
-            max-width: 340px;
-        }
+        .spotlight-wrap { position: relative; min-width: 260px; flex: 1; max-width: 340px; }
         .spotlight-input {
             width: 100%;
             padding: 9px 52px 9px 34px;
@@ -995,7 +1656,6 @@ BARISTA_HTML = """
             color: var(--text-primary);
             font-size: 13.5px;
             font-family: inherit;
-            transition: all 0.2s ease;
         }
         .spotlight-input:focus {
             outline: none;
@@ -1027,21 +1687,14 @@ BARISTA_HTML = """
             pointer-events: none;
         }
 
-        /* Main Container & Bento Grid */
-        .main-container {
-            max-width: 1280px;
-            margin: 22px auto 0;
-            padding: 0 24px;
-        }
+        .main-container { max-width: 1280px; margin: 22px auto 0; padding: 0 24px; }
         .bento-grid {
             display: grid;
             grid-template-columns: 1.05fr 0.95fr 1.15fr;
             gap: 18px;
             margin-bottom: 22px;
         }
-        @media (max-width: 1100px) {
-            .bento-grid { grid-template-columns: 1fr 1fr; }
-        }
+        @media (max-width: 1100px) { .bento-grid { grid-template-columns: 1fr 1fr; } }
         @media (max-width: 760px) {
             .bento-grid { grid-template-columns: 1fr; }
             .sticky-header { padding: 12px 16px; }
@@ -1060,30 +1713,10 @@ BARISTA_HTML = """
             flex-direction: column;
             justify-content: space-between;
         }
-        .bento-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        .bento-title {
-            font-size: 15px;
-            font-weight: 700;
-            letter-spacing: -0.2px;
-            margin: 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .bento-subtitle {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin: 0 0 12px;
-            line-height: 1.4;
-        }
+        .bento-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+        .bento-title { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; margin: 0; display: flex; align-items: center; gap: 8px; }
+        .bento-subtitle { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; line-height: 1.4; }
 
-        /* iOS Segmented Control */
         .segmented-control {
             display: inline-flex;
             background: rgba(0, 0, 0, 0.45);
@@ -1101,7 +1734,6 @@ BARISTA_HTML = """
             padding: 5px 10px;
             border-radius: 7px;
             cursor: pointer;
-            transition: all 0.18s ease;
         }
         .seg-btn.active {
             background: rgba(255, 255, 255, 0.12);
@@ -1109,7 +1741,6 @@ BARISTA_HTML = """
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
         }
 
-        /* Módulo 1: Escáner QR con HUD Cámara iOS */
         .qr-hud-wrapper {
             position: relative;
             background: #080706;
@@ -1118,21 +1749,13 @@ BARISTA_HTML = """
             overflow: hidden;
             min-height: 155px;
             display: flex;
-             flex-direction: column;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             margin-bottom: 12px;
         }
-        #qr-video {
-            width: 100%;
-            max-height: 220px;
-            object-fit: cover;
-            display: none;
-        }
-        .qr-idle-placeholder {
-            padding: 24px 16px;
-            text-align: center;
-        }
+        #qr-video { width: 100%; max-height: 220px; object-fit: cover; display: none; }
+        .qr-idle-placeholder { padding: 24px 16px; text-align: center; }
         .qr-reticle {
             width: 120px;
             height: 120px;
@@ -1173,10 +1796,7 @@ BARISTA_HTML = """
             gap: 6px;
             box-shadow: 0 6px 18px rgba(212, 175, 55, 0.25);
         }
-        .quick-scan-form {
-            display: flex;
-            gap: 8px;
-        }
+        .quick-scan-form { display: flex; gap: 8px; }
         .input-dark {
             width: 100%;
             padding: 10px 12px;
@@ -1187,10 +1807,7 @@ BARISTA_HTML = """
             font-size: 13px;
             font-family: inherit;
         }
-        .input-dark:focus {
-            outline: none;
-            border-color: var(--gold);
-        }
+        .input-dark:focus { outline: none; border-color: var(--gold); }
         .btn-gold-sm {
             background: rgba(212, 175, 55, 0.18);
             border: 1px solid rgba(212, 175, 55, 0.45);
@@ -1202,24 +1819,12 @@ BARISTA_HTML = """
             cursor: pointer;
             white-space: nowrap;
         }
-        .btn-gold-sm:hover {
-            background: var(--gold);
-            color: #12100E;
-        }
 
-        /* Módulo 2: 🎂 Radar de Cumpleaños Widget */
         .bday-card-widget {
             border-color: rgba(255, 55, 95, 0.22);
             background: linear-gradient(160deg, rgba(32, 20, 24, 0.78) 0%, rgba(22, 20, 18, 0.82) 100%);
         }
-        .bday-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-height: 215px;
-            overflow-y: auto;
-            padding-right: 2px;
-        }
+        .bday-list { display: flex; flex-direction: column; gap: 8px; max-height: 215px; overflow-y: auto; padding-right: 2px; }
         .bday-item {
             background: rgba(255, 255, 255, 0.035);
             border: 1px solid rgba(255, 255, 255, 0.07);
@@ -1230,10 +1835,7 @@ BARISTA_HTML = """
             justify-content: space-between;
             gap: 10px;
         }
-        .bday-item.is-today {
-            border-color: rgba(255, 55, 95, 0.45);
-            background: rgba(255, 55, 95, 0.09);
-        }
+        .bday-item.is-today { border-color: rgba(255, 55, 95, 0.45); background: rgba(255, 55, 95, 0.09); }
         .bday-badge-today {
             background: var(--apple-rose);
             color: #FFF;
@@ -1268,17 +1870,9 @@ BARISTA_HTML = """
             font-weight: 700;
             cursor: pointer;
             white-space: nowrap;
-            box-shadow: 0 4px 12px rgba(255, 55, 95, 0.3);
         }
-        .btn-bday-gift:hover { opacity: 0.92; }
 
-        /* Módulo 3: Marketing Push & Lock Screen Preview */
-        .chip-row {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            margin-bottom: 8px;
-        }
+        .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
         .action-chip {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid var(--border-subtle);
@@ -1288,7 +1882,6 @@ BARISTA_HTML = """
             font-size: 11px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.15s ease;
         }
         .action-chip:hover {
             background: rgba(212, 175, 55, 0.15);
@@ -1318,28 +1911,10 @@ BARISTA_HTML = """
             font-size: 15px;
             flex-shrink: 0;
         }
-        .ios-notif-body {
-            flex: 1;
-            min-width: 0;
-        }
-        .ios-notif-top {
-            display: flex;
-            justify-content: space-between;
-            font-size: 10px;
-            font-weight: 700;
-            color: var(--text-secondary);
-            letter-spacing: 0.3px;
-        }
-        .ios-notif-text {
-            font-size: 12px;
-            color: var(--text-primary);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-top: 1px;
-        }
+        .ios-notif-body { flex: 1; min-width: 0; }
+        .ios-notif-top { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; color: var(--text-secondary); }
+        .ios-notif-text { font-size: 12px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 
-        /* Lista de Clientes Estilo Apple Settings */
         .clients-section {
             background: var(--bg-glass);
             backdrop-filter: blur(24px);
@@ -1349,19 +1924,8 @@ BARISTA_HTML = """
             padding: 22px;
             box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4);
         }
-        .clients-top-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            flex-wrap: wrap;
-            margin-bottom: 16px;
-        }
-        .filter-tabs {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-        }
+        .clients-top-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+        .filter-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
         .filter-pill {
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid var(--border-subtle);
@@ -1371,7 +1935,6 @@ BARISTA_HTML = """
             font-size: 12.5px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.15s ease;
         }
         .filter-pill.active {
             background: var(--gold);
@@ -1380,43 +1943,24 @@ BARISTA_HTML = """
             font-weight: 700;
         }
 
-        .client-list {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
+        .client-list { display: flex; flex-direction: column; gap: 10px; }
         .client-card-row {
             background: rgba(255, 255, 255, 0.025);
             border: 1px solid var(--border-subtle);
             border-radius: 16px;
             padding: 14px 16px;
             display: grid;
-            grid-template-columns: 1.4fr 1.1fr 0.9fr auto;
+            grid-template-columns: 1.4fr 1.1fr 0.95fr auto;
             align-items: center;
             gap: 16px;
-            transition: background 0.2s ease, border-color 0.2s ease;
-        }
-        .client-card-row:hover {
-            background: rgba(255, 255, 255, 0.045);
-            border-color: rgba(255, 255, 255, 0.14);
         }
         .client-card-row.highlight-row {
             background: rgba(48, 209, 88, 0.11);
             border-color: rgba(48, 209, 88, 0.45);
         }
-        @media (max-width: 960px) {
-            .client-card-row {
-                grid-template-columns: 1fr;
-                gap: 12px;
-            }
-        }
+        @media (max-width: 960px) { .client-card-row { grid-template-columns: 1fr; gap: 12px; } }
 
-        .client-identity {
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            min-width: 0;
-        }
+        .client-identity { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
         .avatar-circle {
             width: 42px;
             height: 42px;
@@ -1431,27 +1975,10 @@ BARISTA_HTML = """
             justify-content: center;
             flex-shrink: 0;
         }
-        .avatar-circle.tier-gold {
-            background: linear-gradient(135deg, #D4AF37, #8F6B1A);
-            color: #12100E;
-            border-color: #F3E5AB;
-        }
-        .avatar-circle.tier-silver {
-            background: linear-gradient(135deg, #E0E5EC, #8A95A5);
-            color: #12100E;
-            border-color: #FFF;
-        }
-        .client-name-line {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            flex-wrap: wrap;
-        }
-        .client-name {
-            font-size: 15px;
-            font-weight: 700;
-            color: var(--text-primary);
-        }
+        .avatar-circle.tier-gold { background: linear-gradient(135deg, #D4AF37, #8F6B1A); color: #12100E; border-color: #F3E5AB; }
+        .avatar-circle.tier-silver { background: linear-gradient(135deg, #E0E5EC, #8A95A5); color: #12100E; border-color: #FFF; }
+        .client-name-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .client-name { font-size: 15px; font-weight: 700; color: var(--text-primary); }
         .serial-tag {
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 11px;
@@ -1460,54 +1987,15 @@ BARISTA_HTML = """
             padding: 2px 6px;
             border-radius: 5px;
         }
-        .vip-pill {
-            font-size: 10.5px;
-            font-weight: 700;
-            padding: 2px 8px;
-            border-radius: 99px;
-            display: inline-block;
-        }
-        .client-meta {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-top: 4px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-        .client-msg-preview {
-            font-size: 11.5px;
-            color: var(--gold-light);
-            margin-top: 4px;
-            font-style: italic;
-        }
+        .vip-pill { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 99px; display: inline-block; }
+        .client-meta { font-size: 12px; color: var(--text-secondary); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 10px; }
+        .client-msg-preview { font-size: 11.5px; color: var(--gold-light); margin-top: 4px; font-style: italic; }
 
-        /* Visual Stamp Dots in Client Row */
-        .stamp-progress-col {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-        .stamp-top-row {
-            display: flex;
-            align-items: baseline;
-            justify-content: space-between;
-            gap: 8px;
-        }
-        .stamp-big-num {
-            font-size: 17px;
-            font-weight: 800;
-            color: var(--gold-light);
-        }
-        .stamp-visits-meta {
-            font-size: 11.5px;
-            color: var(--text-secondary);
-        }
-        .stamp-dots-row {
-            display: flex;
-            gap: 5px;
-            align-items: center;
-        }
+        .stamp-progress-col { display: flex; flex-direction: column; gap: 5px; }
+        .stamp-top-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+        .stamp-big-num { font-size: 17px; font-weight: 800; color: var(--gold-light); }
+        .stamp-visits-meta { font-size: 11.5px; color: var(--text-secondary); }
+        .stamp-dots-row { display: flex; gap: 5px; align-items: center; }
         .s-dot {
             width: 12px;
             height: 12px;
@@ -1516,24 +2004,10 @@ BARISTA_HTML = """
             background: transparent;
             display: inline-block;
         }
-        .s-dot.filled {
-            background: var(--gold);
-            border-color: #F3E5AB;
-            box-shadow: 0 0 6px rgba(212, 175, 55, 0.45);
-        }
-        .s-dot.full-10 {
-            background: var(--apple-green);
-            border-color: #A8F5BC;
-            box-shadow: 0 0 8px rgba(48, 209, 88, 0.6);
-        }
+        .s-dot.filled { background: var(--gold); border-color: #F3E5AB; box-shadow: 0 0 6px rgba(212, 175, 55, 0.45); }
+        .s-dot.full-10 { background: var(--apple-green); border-color: #A8F5BC; box-shadow: 0 0 8px rgba(48, 209, 88, 0.6); }
 
-        /* Telemetry Column */
-        .telemetry-col {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            align-items: flex-start;
-        }
+        .telemetry-col { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
         .status-pill-on {
             background: rgba(48, 209, 88, 0.14);
             border: 1px solid rgba(48, 209, 88, 0.35);
@@ -1551,19 +2025,9 @@ BARISTA_HTML = """
             padding: 3px 9px;
             border-radius: 99px;
         }
-        .tele-line {
-            font-size: 11px;
-            color: var(--text-secondary);
-        }
+        .tele-line { font-size: 11px; color: var(--text-secondary); }
 
-        /* Tactile Actions Column */
-        .row-actions {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-        }
+        .row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
         .btn-stamp-plus {
             background: linear-gradient(135deg, #D4AF37 0%, #B38A22 100%);
             color: #12100E;
@@ -1574,9 +2038,7 @@ BARISTA_HTML = """
             font-weight: 800;
             cursor: pointer;
             box-shadow: 0 4px 12px rgba(212, 175, 55, 0.22);
-            transition: transform 0.12s ease;
         }
-        .btn-stamp-plus:active { transform: scale(0.96); }
         .btn-redeem-glow {
             background: linear-gradient(135deg, #30D158 0%, #229E42 100%);
             color: #09140C;
@@ -1611,21 +2073,16 @@ BARISTA_HTML = """
             font-size: 12px;
             font-weight: 600;
             cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
         }
-        .btn-icon-sec:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: var(--text-primary);
-        }
-        .btn-icon-del:hover {
-            background: rgba(255, 55, 95, 0.2);
-            border-color: rgba(255, 55, 95, 0.45);
-            color: #FF6B88;
-        }
+        .btn-icon-sec:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
+        .btn-icon-del:hover { background: rgba(255, 55, 95, 0.2); border-color: rgba(255, 55, 95, 0.45); color: #FF6B88; }
     </style>
 </head>
 <body>
 
-    <!-- Dynamic Island Toast Notification -->
     {% if ok %}
     <div class="dynamic-island-wrap" id="status-toast">
         <div class="dynamic-island">
@@ -1636,20 +2093,19 @@ BARISTA_HTML = """
     </div>
     {% endif %}
 
-    <!-- Cabecera Flotante (Sticky Glass Header) -->
     <header class="sticky-header">
         <div class="header-inner">
             <div class="brand-Cluster">
                 <div class="brand-emblem">☕️</div>
                 <div>
                     <h1 class="brand-title">Maishas Café</h1>
-                    <span class="brand-sub">Apple Wallet POS Console</span>
+                    <span class="brand-sub">iOS & Android POS Console</span>
                 </div>
             </div>
 
             <div class="kpi-cluster">
                 <div class="kpi-pill">👥 Clientes <strong>{{ clients|length }}</strong></div>
-                <div class="kpi-pill">📲 En iPhone <strong>{{ installed_count }}</strong></div>
+                <div class="kpi-pill">📲 Activos (/🤖) <strong>{{ installed_count }}</strong></div>
                 <div class="kpi-pill">🎁 Canjeados <strong>{{ total_redeemed }}</strong></div>
                 <div class="kpi-pill">♛ VIP <strong>{{ gold_count + silver_count }}</strong></div>
                 <div class="kpi-pill kpi-bday" onclick="setFilterTab('bday')" title="Ver cumpleañeros">
@@ -1666,7 +2122,6 @@ BARISTA_HTML = """
     </header>
 
     <main class="main-container">
-        <!-- BENTO GRID SUPERIOR (3 MÓDULOS) -->
         <section class="bento-grid">
 
             <!-- MÓDULO 1: ESCÁNER QR CON HUD ESTILO CÁMARA iOS -->
@@ -1674,12 +2129,12 @@ BARISTA_HTML = """
                 <div>
                     <div class="bento-header">
                         <h2 class="bento-title">📷 Escáner QR Mostrador</h2>
-                        <div class="segmented-control" title="Modo de acción al escanear QR">
+                        <div class="segmented-control">
                             <button type="button" id="seg-auto-on" class="seg-btn active" onclick="setAutoScanMode(true)">⚡ +1 Auto</button>
                             <button type="button" id="seg-auto-off" class="seg-btn" onclick="setAutoScanMode(false)">🔍 Manual</button>
                         </div>
                     </div>
-                    <p class="bento-subtitle">Apunta al pase en el iPhone del cliente o usa un lector físico USB/Bluetooth.</p>
+                    <p class="bento-subtitle">Escanea la tarjeta del cliente (iPhone Apple Wallet o Android Wallet Digital).</p>
 
                     <div class="qr-hud-wrapper" id="qr-hud-box">
                         <div class="scan-flash" id="scan-flash-overlay"></div>
@@ -1691,7 +2146,7 @@ BARISTA_HTML = """
                             <button type="button" id="btn-toggle-cam" class="btn-cam-launch" onclick="toggleScanner()">
                                 <span>📷 Activar Cámara QR</span>
                             </button>
-                            <div style="font-size:11px; color:var(--text-tertiary); margin-top:8px;">Compatible con Safari iOS, iPadOS y Mac</div>
+                            <div style="font-size:11px; color:var(--text-tertiary); margin-top:8px;">Compatible con iPhone, Android, iPad y Mac</div>
                         </div>
                     </div>
                     <div id="qr-status" style="font-size:12px; color:var(--gold-light); margin-bottom:8px; display:none; text-align:center;"></div>
@@ -1705,7 +2160,7 @@ BARISTA_HTML = """
                 </form>
             </div>
 
-            <!-- MÓDULO 2: 🎂 RADAR DE CUMPLEAÑOS (APPLE CALENDAR WIDGET) -->
+            <!-- MÓDULO 2: 🎂 RADAR DE CUMPLEAÑOS -->
             <div class="bento-card bday-card-widget">
                 <div>
                     <div class="bento-header">
@@ -1714,7 +2169,7 @@ BARISTA_HTML = """
                             Hoy y próx. 7 días
                         </span>
                     </div>
-                    <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su Apple Wallet con 1 clic.</p>
+                    <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su iPhone o Android con 1 clic.</p>
 
                     <div class="bday-list">
                         {% for bclient in upcoming_birthdays %}
@@ -1733,7 +2188,7 @@ BARISTA_HTML = """
                             <form action="/api/send-message" method="POST" style="margin:0;">
                                 <input type="hidden" name="target" value="{{ bclient.serial }}">
                                 <input type="hidden" name="message" value="🎂 ¡Feliz cumpleaños, {{ bclient.first_name }}! Te esperamos en Maishas Café con una sorpresa especial para celebrar tu día ☕️✨">
-                                <button type="submit" class="btn-bday-gift" title="Enviar regalo Push a {{ bclient.name }}">
+                                <button type="submit" class="btn-bday-gift">
                                     🎁 Enviar Regalo Push
                                 </button>
                             </form>
@@ -1758,7 +2213,7 @@ BARISTA_HTML = """
                 </div>
             </div>
 
-            <!-- MÓDULO 3: CENTRO DE MARKETING PUSH & GEOLOCALIZACIÓN GPS -->
+            <!-- MÓDULO 3: MARKETING PUSH & GEOLOCALIZACIÓN GPS -->
             <div class="bento-card">
                 <div>
                     <div class="bento-header">
@@ -1769,7 +2224,6 @@ BARISTA_HTML = """
                         </div>
                     </div>
 
-                    <!-- Pestaña A: Marketing Push con Vista Previa Lock Screen -->
                     <div id="mkt-pane-push">
                         <div class="chip-row">
                             <button type="button" class="action-chip" onclick="setTemplate('🥐 ¡Recién salidos del horno! Ven por tu pan calientito y suma tu sello de hoy ☕️')">🥐 Pan horneado</button>
@@ -1778,14 +2232,13 @@ BARISTA_HTML = """
                         </div>
 
                         <form action="/api/send-message" method="POST">
-                            <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="2" placeholder="Escribe una promoción o aviso para la pantalla bloqueada..." required oninput="updateLockScreenPreview(this.value)"></textarea>
+                            <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="2" placeholder="Escribe una promoción o aviso para iPhone y Android..." required oninput="updateLockScreenPreview(this.value)"></textarea>
 
-                            <!-- Vista Previa iPhone Lock Screen -->
                             <div class="ios-lockscreen-preview">
                                 <div class="ios-notif-icon">☕️</div>
                                 <div class="ios-notif-body">
                                     <div class="ios-notif-top">
-                                        <span>MAISHAS CAFÉ</span>
+                                        <span>MAISHAS CAFÉ (iOS & ANDROID)</span>
                                         <span>ahora</span>
                                     </div>
                                     <div class="ios-notif-text" id="ios-preview-text">📣 Escribe un mensaje para previsualizar...</div>
@@ -1794,7 +2247,7 @@ BARISTA_HTML = """
 
                             <div style="display:flex; gap:8px; margin-top:8px;">
                                 <select name="target" id="push-target-select" class="input-dark" style="flex:1;">
-                                    <option value="all">📲 Todos ({{ installed_count }} iPhones activos)</option>
+                                    <option value="all">📲 Todos ({{ installed_count }} dispositivos activos)</option>
                                     {% for client in clients %}
                                     <option value="{{ client.serial }}">{{ client.name }} ({{ client.serial }})</option>
                                     {% endfor %}
@@ -1804,9 +2257,8 @@ BARISTA_HTML = """
                         </form>
                     </div>
 
-                    <!-- Pestaña B: Geolocalización GPS -->
                     <div id="mkt-pane-gps" style="display:none;">
-                        <p class="bento-subtitle">Alerta automática en pantalla bloqueada cuando el cliente pasa a ~150m de la cafetería.</p>
+                        <p class="bento-subtitle">Alerta automática cuando el cliente pasa a ~150m de la cafetería.</p>
                         <form action="/api/update-location" method="POST">
                             <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:8px; margin-bottom:8px;">
                                 <div>
@@ -1818,7 +2270,7 @@ BARISTA_HTML = """
                                     <input type="text" id="lng-input" name="lng" class="input-dark" value="{{ shop_loc.lng }}" required>
                                 </div>
                                 <div style="display:flex; align-items:flex-end;">
-                                    <button type="button" class="btn-gold-sm" onclick="detectMyGPS()" title="Usar GPS actual">📍 Mi GPS</button>
+                                    <button type="button" class="btn-gold-sm" onclick="detectMyGPS()">📍 Mi GPS</button>
                                 </div>
                             </div>
                             <div style="margin-bottom:10px;">
@@ -1834,12 +2286,12 @@ BARISTA_HTML = """
             </div>
         </section>
 
-        <!-- LISTA DE CLIENTES DE LECTURA ULTRA-RÁPIDA -->
+        <!-- LISTA DE CLIENTES -->
         <section class="clients-section">
             <div class="clients-top-bar">
                 <div class="filter-tabs" id="filter-tabs-bar">
                     <button type="button" class="filter-pill active" data-tab="all" onclick="setFilterTab('all')">Todos ({{ clients|length }})</button>
-                    <button type="button" class="filter-pill" data-tab="installed" onclick="setFilterTab('installed')">📲 En iPhone ({{ installed_count }})</button>
+                    <button type="button" class="filter-pill" data-tab="installed" onclick="setFilterTab('installed')">📲 Activos /🤖 ({{ installed_count }})</button>
                     <button type="button" class="filter-pill" data-tab="ready" onclick="setFilterTab('ready')">🎁 Listos para Canjear ({{ ready_to_redeem_count }})</button>
                     <button type="button" class="filter-pill" data-tab="bday" onclick="setFilterTab('bday')">🎂 Cumpleaños ({{ upcoming_birthdays|length + month_birthdays_count }})</button>
                     <button type="button" class="filter-pill" data-tab="vip" onclick="setFilterTab('vip')">♛ Socios VIP ({{ gold_count + silver_count }})</button>
@@ -1856,7 +2308,6 @@ BARISTA_HTML = """
                      data-bday="{{ '1' if (client.bday.is_upcoming_week or client.bday.is_this_month) else '0' }}"
                      data-vip="{{ '1' if client.total_visits >= 10 else '0' }}">
 
-                    <!-- Columna 1: Identidad, Avatar, Nivel VIP y Metadatos -->
                     <div class="client-identity">
                         <div class="avatar-circle tier-{{ client.tier.key }}">{{ client.initials }}</div>
                         <div style="min-width:0;">
@@ -1882,7 +2333,6 @@ BARISTA_HTML = """
                         </div>
                     </div>
 
-                    <!-- Columna 2: Barra de Progreso Visual de 10 Sellos -->
                     <div class="stamp-progress-col">
                         <div class="stamp-top-row">
                             <span class="stamp-big-num">{{ client.stamps }} / 10</span>
@@ -1891,17 +2341,20 @@ BARISTA_HTML = """
                                 {% if client.redeemed_count > 0 %} · 🎁 {{ client.redeemed_count }} canjes{% endif %}
                             </span>
                         </div>
-                        <div class="stamp-dots-row" aria-label="{{ client.stamps }} de 10 sellos">
+                        <div class="stamp-dots-row">
                             {% for idx in range(10) %}
                             <span class="s-dot {{ 'full-10' if client.stamps >= 10 else ('filled' if idx < client.stamps else '') }}"></span>
                             {% endfor %}
                         </div>
                     </div>
 
-                    <!-- Columna 3: Telemetría Apple Wallet -->
                     <div class="telemetry-col">
-                        {% if client.is_installed %}
-                        <span class="status-pill-on">📲 Activo en iPhone ({{ client.device_count }})</span>
+                        {% if client.ios_installed and client.android_installed %}
+                        <span class="status-pill-on"> iPhone + 🤖 Android Activos</span>
+                        {% elif client.ios_installed %}
+                        <span class="status-pill-on"> Activo en iPhone ({{ client.ios_count }})</span>
+                        {% elif client.android_installed %}
+                        <span class="status-pill-on">🤖 Activo en Android</span>
                         {% else %}
                         <span class="status-pill-off">⏳ Pendiente de instalar</span>
                         {% endif %}
@@ -1913,12 +2366,11 @@ BARISTA_HTML = """
                         {% endif %}
                     </div>
 
-                    <!-- Columna 4: Botones Táctiles de Acción -->
                     <div class="row-actions">
                         <form action="/api/add-stamp" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="add">
-                            <button type="submit" class="btn-stamp-plus" title="Sumar 1 sello a {{ client.name }}">+1 Sello ☕️</button>
+                            <button type="submit" class="btn-stamp-plus">+1 Sello ☕️</button>
                         </form>
 
                         {% if client.stamps >= 10 %}
@@ -1928,10 +2380,10 @@ BARISTA_HTML = """
                             <button type="submit" class="btn-redeem-glow">🎁 Canjear Café</button>
                         </form>
                         {% elif client.stamps > 0 %}
-                        <form action="/api/add-stamp" method="POST" style="margin:0;" onsubmit="return confirm('¿Canjear recompensa anticipada y reiniciar a 0/10 para {{ client.name }}?');">
+                        <form action="/api/add-stamp" method="POST" style="margin:0;" onsubmit="return confirm('¿Canjear recompensa y reiniciar a 0/10 para {{ client.name }}?');">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="reset">
-                            <button type="submit" class="btn-redeem-normal" title="Canjear y reiniciar a 0">🎁 Canjear</button>
+                            <button type="submit" class="btn-redeem-normal">🎁 Canjear</button>
                         </form>
                         {% endif %}
 
@@ -1943,6 +2395,7 @@ BARISTA_HTML = """
                         </form>
                         {% endif %}
 
+                        <a href="/card/{{ client.serial }}" target="_blank" class="btn-icon-sec" title="Abrir Tarjeta Digital Android/Web de {{ client.name }}">📲</a>
                         <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name }}')">💬</button>
 
                         <form action="/api/delete-client" method="POST" style="margin:0;" onsubmit="return confirm('¿Eliminar permanentemente a {{ client.name }} ({{ client.serial }})?');">
@@ -1953,7 +2406,7 @@ BARISTA_HTML = """
                 </div>
                 {% else %}
                 <div style="text-align:center; padding:40px 20px; color:var(--text-secondary);">
-                    No hay clientes registrados todavía. Comparte el enlace principal para empezar.
+                    No hay clientes registrados todavía.
                 </div>
                 {% endfor %}
             </div>
@@ -1961,12 +2414,10 @@ BARISTA_HTML = """
     </main>
 
     <script>
-        // 1. Limpiar parámetros ?ok=... de la URL sin recargar
         if (window.history.replaceState && window.location.search) {
             window.history.replaceState({}, document.title, window.location.pathname);
         }
 
-        // Auto-ocultar Dynamic Island Toast después de 6 segundos
         const toastEl = document.getElementById('status-toast');
         if (toastEl) {
             setTimeout(() => {
@@ -1976,7 +2427,6 @@ BARISTA_HTML = """
             }, 6500);
         }
 
-        // 2. Atajo de teclado Spotlight (⌘K o Ctrl+K)
         document.addEventListener('keydown', (e) => {
             if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
@@ -1988,7 +2438,6 @@ BARISTA_HTML = """
             }
         });
 
-        // 3. Vista Previa de Notificación en Pantalla Bloqueada iOS
         function updateLockScreenPreview(val) {
             const preview = document.getElementById('ios-preview-text');
             const clean = (val || '').trim();
@@ -2036,9 +2485,7 @@ BARISTA_HTML = """
             }
         }
 
-        // 4. Filtrado combinado por Pestaña + Spotlight Search
         let activeTab = 'all';
-
         function setFilterTab(tab) {
             activeTab = tab;
             document.querySelectorAll('.filter-pill').forEach(btn => {
@@ -2058,12 +2505,10 @@ BARISTA_HTML = """
                 else if (activeTab === 'ready') matchesTab = row.getAttribute('data-ready') === '1';
                 else if (activeTab === 'bday') matchesTab = row.getAttribute('data-bday') === '1';
                 else if (activeTab === 'vip') matchesTab = row.getAttribute('data-vip') === '1';
-
                 row.style.display = (matchesQuery && matchesTab) ? '' : 'none';
             });
         }
 
-        // 5. Detectar GPS del navegador
         function detectMyGPS() {
             if (!navigator.geolocation) {
                 alert('Tu navegador no soporta geolocalización.');
@@ -2074,14 +2519,11 @@ BARISTA_HTML = """
                     document.getElementById('lat-input').value = pos.coords.latitude.toFixed(6);
                     document.getElementById('lng-input').value = pos.coords.longitude.toFixed(6);
                 },
-                err => {
-                    alert('No se pudo obtener la ubicación GPS: ' + err.message);
-                },
+                err => alert('No se pudo obtener la ubicación GPS: ' + err.message),
                 { enableHighAccuracy: true }
             );
         }
 
-        // 6. Escáner QR con HUD estilo Cámara iOS
         let videoStream = null;
         let scanning = false;
         let autoScanMode = true;
@@ -2130,11 +2572,11 @@ BARISTA_HTML = """
                 video.style.display = 'block';
                 reticle.style.display = 'block';
                 status.style.display = 'block';
-                status.textContent = 'Apunta al código QR del Apple Wallet (Clic en el video para cerrar)';
+                status.textContent = 'Apunta al código QR del cliente (Clic en el video para cerrar)';
                 video.onclick = stopScanner;
                 requestAnimationFrame(scanTick);
             } catch (err) {
-                alert('No se pudo abrir la cámara (verifica permisos en Safari/Chrome): ' + err.message);
+                alert('No se pudo abrir la cámara: ' + err.message);
             }
         }
 
@@ -2227,10 +2669,8 @@ def generate_signed_pkpass(
         visits = total_visits if total_visits is not None else stamps
         tier = get_vip_tier(visits)
 
-        # 🎨 1. Generar strip.png y strip@2x.png dinámicamente con Pillow reflejando los sellos reales
         render_dynamic_strip(stamps, temp_dir, total_visits=visits)
 
-        # 🎨 2. Configurar pass.json con paleta Luxury Coffee y jerarquía limpia sin superposición
         pass_json_path = os.path.join(temp_dir, "pass.json")
         with open(pass_json_path, "r", encoding="utf-8") as f:
             pass_data = json.load(f)
@@ -2250,7 +2690,6 @@ def generate_signed_pkpass(
             }
         ]
 
-        # Mensaje dinámico en pantalla bloqueada según los sellos
         if stamps == 0:
             stamp_change_msg = "🎁 ¡Sellos actualizados en Maishas Café! Total: %@"
         elif stamps >= 10:
@@ -2268,7 +2707,6 @@ def generate_signed_pkpass(
             }
         ]
 
-        # primaryFields vacío para que iOS NO dibuje texto encima de los 10 sellos del strip.png
         pass_data["storeCard"]["primaryFields"] = []
 
         reward_status = "¡CAFÉ GRATIS! 🎉" if stamps >= 10 else f"Faltan {10 - stamps} sellos"
@@ -2302,7 +2740,6 @@ def generate_signed_pkpass(
             }
         ]
 
-        # 📍 Geolocalización inteligente: muestra la tarjeta en la pantalla bloqueada al pasar cerca
         shop_loc = get_shop_location()
         pass_data["locations"] = [
             {
@@ -2313,14 +2750,12 @@ def generate_signed_pkpass(
         ]
         pass_data["maxDistance"] = 150
 
-        # 🔔 Configuración del Web Service para Notificaciones Push (APNs)
         clean_host = host_url.rstrip("/")
         if not ("localhost" in clean_host or "127.0.0.1" in clean_host):
             clean_host = clean_host.replace("http://", "https://", 1)
         pass_data["webServiceURL"] = f"{clean_host}/"
         pass_data["authenticationToken"] = AUTH_TOKEN
 
-        # 📣 Reverso del pase: Mensaje con changeMessage para alertas Push + Historial VIP
         pass_data["storeCard"]["backFields"].insert(0, {
             "key": "news",
             "label": "Mensaje de Maishas Café",
@@ -2349,7 +2784,6 @@ def generate_signed_pkpass(
         with open(pass_json_path, "w", encoding="utf-8") as f:
             json.dump(pass_data, f, indent=2)
 
-        # 3. Calcular Manifest SHA1 (incluyendo los nuevos strip.png y strip@2x.png)
         manifest = {}
         for root, dirs, files in os.walk(temp_dir):
             for fname in files:
@@ -2364,7 +2798,6 @@ def generate_signed_pkpass(
         with open(manifest_path, "w", encoding="utf-8") as fp:
             json.dump(manifest, fp, indent=2)
 
-        # 4. Firmar con OpenSSL
         sig_path = os.path.join(temp_dir, "signature")
         cmd_sign = (
             f'openssl smime -sign -signer "{CERT_PEM}" -inkey "{KEY_PEM}" '
@@ -2389,7 +2822,7 @@ def generate_signed_pkpass(
 
 
 # ---------------------------------------------------------
-# RUTA PRINCIPAL Y BARISTA
+# RUTA PRINCIPAL, BARISTA Y TARJETA ANDROID
 # ---------------------------------------------------------
 
 @app.route("/")
@@ -2402,12 +2835,12 @@ def index():
 def barista():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Ordenar por rowid DESC (orden fijo de creación) para que las filas NUNCA salten al actualizar sellos
     c.execute("""
         SELECT c.serial, c.name, c.email, c.stamps, c.push_token, c.message,
                c.phone, c.birthdate, c.last_push_status, c.last_sync_at,
                (SELECT COUNT(*) FROM registrations r WHERE r.serial = c.serial) as reg_count,
-               c.total_visits, c.redeemed_count
+               c.total_visits, c.redeemed_count, c.android_active,
+               (SELECT COUNT(*) FROM android_subscriptions a WHERE a.serial = c.serial) as and_sub_count
         FROM clients c
         ORDER BY c.rowid DESC
     """)
@@ -2425,7 +2858,9 @@ def barista():
 
     for r in rows:
         reg_count = r[10] or 0
-        is_installed = bool(r[4]) or reg_count > 0
+        ios_installed = bool(r[4]) or reg_count > 0
+        android_installed = bool(r[13]) or ((r[14] or 0) > 0)
+        is_installed = ios_installed or android_installed
         if is_installed:
             installed_count += 1
         stamps_val = r[3] or 0
@@ -2468,7 +2903,9 @@ def barista():
             "bday": bday_info,
             "last_push_status": r[8] or "",
             "last_sync_at": r[9] or "",
-            "device_count": max(reg_count, 1 if r[4] else 0),
+            "ios_count": max(reg_count, 1 if r[4] else 0),
+            "ios_installed": ios_installed,
+            "android_installed": android_installed,
             "is_installed": is_installed,
             "total_visits": visits_val,
             "redeemed_count": redeemed_val,
@@ -2478,7 +2915,6 @@ def barista():
         if bday_info["is_upcoming_week"]:
             upcoming_birthdays.append(client_obj)
 
-    # Ordenar cumpleañeros de la semana: primero los que cumplen HOY (days_until == 0)
     upcoming_birthdays.sort(key=lambda x: x["bday"]["days_until"])
 
     return render_template_string(
@@ -2503,18 +2939,31 @@ def register():
     email = (request.form.get("email") or "").strip()
     phone = (request.form.get("phone") or "").strip()
     birthdate = (request.form.get("birthdate") or "").strip()
+    platform_req = (request.form.get("platform") or "").strip().lower()
+
+    ua = (request.headers.get("User-Agent") or "").lower()
+    if platform_req == "android" or (not platform_req and "android" in ua):
+        platform = "android"
+    else:
+        platform = "ios"
+
     serial_number = f"MAISHAS-{uuid.uuid4().hex[:6].upper()}"
     now_ts = get_utc_timestamp()
+    android_active = 1 if platform == "android" else 0
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)""",
-        (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts)
+        """INSERT INTO clients (serial, name, email, phone, birthdate, stamps, total_visits, redeemed_count, message, updated_at, platform, android_active)
+           VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)""",
+        (serial_number, name, email, phone, birthdate, DEFAULT_MESSAGE, now_ts, platform, android_active)
     )
     conn.commit()
     conn.close()
+
+    # Si es Android, redirigir directamente a su Tarjeta Digital Interactiva Android
+    if platform == "android":
+        return redirect(url_for("android_card_view", serial_number=serial_number))
 
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
@@ -2528,6 +2977,247 @@ def register():
         as_attachment=True,
         download_name=f"MaishasCafe_{safe_name}.pkpass"
     )
+
+
+# ---------------------------------------------------------
+# ENDPOINTS DE TARJETA DIGITAL ANDROID (PWA, QR, STRIP, WEB PUSH & LIVE SYNC)
+# ---------------------------------------------------------
+
+@app.route("/card/<serial_number>")
+def android_card_view(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT serial, name, email, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    )
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return "Tarjeta no encontrada", 404
+
+    serial_id = row[0]
+    c.execute("UPDATE clients SET android_active = 1, last_sync_at = ? WHERE serial = ?", (get_short_time(), serial_id))
+    conn.commit()
+    conn.close()
+
+    stamps_val = row[3] or 0
+    visits_val = row[7] if row[7] is not None else stamps_val
+    redeemed_val = row[8] or 0
+    tier = get_vip_tier(visits_val)
+    reward_status = "¡CAFÉ GRATIS! 🎉" if stamps_val >= 10 else f"Faltan {10 - stamps_val} sellos"
+
+    client_data = {
+        "serial": serial_id,
+        "name": row[1] or "Cliente",
+        "email": row[2] or "",
+        "stamps": stamps_val,
+        "message": (row[4] or DEFAULT_MESSAGE).replace("\u200b", ""),
+        "phone": row[5] or "",
+        "birthdate": row[6] or "",
+        "total_visits": visits_val,
+        "redeemed_count": redeemed_val,
+        "updated_at": row[9] or "",
+        "tier": tier,
+        "reward_status": reward_status,
+    }
+    return render_template_string(
+        ANDROID_CARD_HTML,
+        client=client_data,
+        shop_loc=get_shop_location(),
+        vapid_public_key=VAPID_PUBLIC_KEY
+    )
+
+
+@app.route("/card/<serial_number>/strip.png")
+def android_card_strip(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT stamps FROM clients WHERE UPPER(serial) = ?", (serial_clean,)).fetchone()
+    conn.close()
+    stamps_val = row[0] if row else 0
+    img = _create_dynamic_strip_pil(stamps_val).resize((750, 250), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    resp = send_file(buf, mimetype="image/png", max_age=0)
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/card/<serial_number>/qr.png")
+def android_card_qr(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=1)
+    qr.add_data(serial_clean)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#12100E", back_color="#FFFFFF").convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png", max_age=3600)
+
+
+@app.route("/card/<serial_number>/download.pkpass")
+def download_pkpass_direct(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT serial, name, stamps, message, phone, birthdate, total_visits, redeemed_count FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return "No encontrado", 404
+    pkpass_path = generate_signed_pkpass(
+        row[0], row[1], row[2] or 0, request.host_url, row[3],
+        phone=row[4], birthdate=row[5], total_visits=row[6], redeemed_count=row[7] or 0
+    )
+    safe_name = "".join(ch if ch.isalnum() else "_" for ch in (row[1] or "Cliente"))
+    return send_file(
+        pkpass_path,
+        mimetype="application/vnd.apple.pkpass",
+        as_attachment=True,
+        download_name=f"MaishasCafe_{safe_name}.pkpass"
+    )
+
+
+@app.route("/card/icon-192.png")
+def card_icon_192():
+    icon_path = os.path.join(PASS_TEMPLATE_DIR, "icon@2x.png")
+    img = Image.open(icon_path).resize((192, 192), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png", max_age=86400)
+
+
+@app.route("/card/<serial_number>/manifest.webmanifest")
+def android_manifest(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    manifest_data = {
+        "name": "Maishas Café — Tarjeta de Fidelidad",
+        "short_name": "Maishas Café",
+        "start_url": f"/card/{serial_clean}",
+        "display": "standalone",
+        "background_color": "#0D0C0B",
+        "theme_color": "#12100E",
+        "icons": [
+            {"src": "/card/icon-192.png", "sizes": "192x192", "type": "image/png"}
+        ]
+    }
+    return Response(json.dumps(manifest_data), mimetype="application/manifest+json")
+
+
+@app.route("/sw.js")
+def service_worker_js():
+    sw_code = """
+self.addEventListener('install', event => { self.skipWaiting(); });
+self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+
+self.addEventListener('push', event => {
+    let data = { title: 'Maishas Café ☕️', body: 'Tu tarjeta de fidelidad se ha actualizado.', url: '/' };
+    if (event.data) {
+        try { data = Object.assign(data, event.data.json()); }
+        catch (e) { data.body = event.data.text(); }
+    }
+    const options = {
+        body: data.body,
+        icon: '/card/icon-192.png',
+        badge: '/card/icon-192.png',
+        vibrate: [150, 70, 150],
+        data: { url: data.url || '/' }
+    };
+    event.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    const targetUrl = (event.notification.data && event.notification.data.url) ? event.notification.data.url : '/';
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+            for (let client of windowClients) {
+                if (client.url.includes(targetUrl) && 'focus' in client) return client.focus();
+            }
+            if (clients.openWindow) return clients.openWindow(targetUrl);
+        })
+    );
+});
+"""
+    return Response(sw_code.strip(), mimetype="application/javascript")
+
+
+@app.route("/api/android/heartbeat/<serial_number>", methods=["POST"])
+def android_heartbeat(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE clients SET android_active = 1, last_sync_at = ? WHERE UPPER(serial) = ?", (get_short_time(), serial_clean))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/android/subscribe/<serial_number>", methods=["POST"])
+def android_subscribe(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    payload = request.get_json(silent=True) or {}
+    sub = payload.get("subscription") or {}
+    endpoint = sub.get("endpoint")
+    if not endpoint:
+        return jsonify({"ok": False, "error": "Missing endpoint"}), 400
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO android_subscriptions (serial, endpoint, sub_json, created_at) VALUES (?, ?, ?, ?)",
+        (serial_clean, endpoint, json.dumps(sub), get_utc_timestamp())
+    )
+    c.execute(
+        "UPDATE clients SET android_active = 1, last_sync_at = ? WHERE UPPER(serial) = ?",
+        (get_short_time(), serial_clean)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/android/state/<serial_number>")
+def android_card_state(serial_number):
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT serial, name, stamps, message, total_visits, redeemed_count, updated_at FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    )
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Not found"}), 404
+
+    # Registrar que el teléfono Android está sincronizado en vivo
+    c.execute("UPDATE clients SET android_active = 1, last_sync_at = ? WHERE serial = ?", (get_short_time(), row[0]))
+    conn.commit()
+    conn.close()
+
+    stamps_val = row[2] or 0
+    visits_val = row[4] if row[4] is not None else stamps_val
+    redeemed_val = row[5] or 0
+    tier = get_vip_tier(visits_val)
+    reward_status = "¡CAFÉ GRATIS! 🎉" if stamps_val >= 10 else f"Faltan {10 - stamps_val} sellos"
+    clean_msg = (row[3] or DEFAULT_MESSAGE).replace("\u200b", "")
+
+    return jsonify({
+        "serial": row[0],
+        "name": row[1],
+        "stamps": stamps_val,
+        "message": clean_msg,
+        "tier_name": tier["name"],
+        "reward_status": reward_status,
+        "history_text": f"Nivel: {tier['name']} | Visitas históricas: {visits_val} | Cafés gratis canjeados: {redeemed_val} ({tier['next_goal']})",
+        "updated_at": row[6] or ""
+    })
 
 
 def _perform_stamp_update(serial, action="add"):
@@ -2561,11 +3251,13 @@ def _perform_stamp_update(serial, action="add"):
         new_visits = max(0, current_visits - 1)
         new_redeemed = current_redeemed
         action_label = f"Sello restado a {client_name} ({serial_id}): {new_stamps}/10"
+        notif_body = f"Sellos actualizados en Maishas Café: {new_stamps} / 10"
     elif action == "reset":
         new_stamps = 0
         new_visits = current_visits
         new_redeemed = current_redeemed + 1
         action_label = f"🎁 Café Gratis canjeado para {client_name} ({serial_id}): reiniciado a 0/10 (Total canjes: {new_redeemed}){bday_alert}"
+        notif_body = "🎁 ¡Disfruta tu Café Gratis! Tu tarjeta se ha reiniciado a 0 / 10."
     else:
         if current_stamps >= 10:
             conn.close()
@@ -2577,6 +3269,10 @@ def _perform_stamp_update(serial, action="add"):
         new_tier = get_vip_tier(new_visits)["name"]
         tier_note = f" — 🏆 ¡Subió a {new_tier}!" if new_tier != old_tier else ""
         action_label = f"✅ Sello agregado a {client_name} ({serial_id}): ahora tiene {new_stamps}/10 ({new_visits} visitas){tier_note}{bday_alert}"
+        if new_stamps >= 10:
+            notif_body = "🎉 ¡Felicidades! Completaste 10/10 sellos. ¡Tienes 1 Café Gratis disponible en Maishas Café!"
+        else:
+            notif_body = f"☕️ ¡Has ganado 1 nuevo sello en Maishas Café! Total: {new_stamps} / 10"
 
     now_ts = get_utc_timestamp()
     c.execute(
@@ -2586,7 +3282,7 @@ def _perform_stamp_update(serial, action="add"):
     conn.commit()
     conn.close()
 
-    push_summary = send_apns_push_for_serial(serial_id)
+    push_summary = send_apns_push_for_serial(serial_id, notification_body=notif_body)
     return serial_id, f"{action_label} — {push_summary}"
 
 
@@ -2633,13 +3329,13 @@ def update_location():
 
     pushed = 0
     for s in serials:
-        res = send_apns_push_for_serial(s)
-        if "200 OK" in res:
+        res = send_apns_push_for_serial(s, notification_body=relevant_text)
+        if "200 OK" in res or "Android" in res:
             pushed += 1
 
     return redirect(url_for(
         "barista",
-        ok=f"📍 Ubicación GPS guardada ({lat:.5f}, {lng:.5f}) y sincronizada con {pushed} iPhone(s) activos"
+        ok=f"📍 Ubicación GPS guardada ({lat:.5f}, {lng:.5f}) y sincronizada con {pushed} dispositivo(s) activos"
     ))
 
 
@@ -2652,6 +3348,7 @@ def delete_client():
     c.execute("SELECT name FROM clients WHERE serial = ?", (serial,))
     row = c.fetchone()
     c.execute("DELETE FROM registrations WHERE serial = ?", (serial,))
+    c.execute("DELETE FROM android_subscriptions WHERE serial = ?", (serial,))
     c.execute("DELETE FROM clients WHERE serial = ?", (serial,))
     conn.commit()
     conn.close()
@@ -2677,8 +3374,6 @@ def send_message():
 
     now_ts = get_utc_timestamp()
     for serial_id, _, prev_msg in rows:
-        # Si el barista envía el mismo texto dos veces seguidas, alternamos un espacio invisible (\u200b)
-        # para que iOS detecte un cambio en pass.json y SIEMPRE muestre la notificación en pantalla bloqueada
         msg_to_save = raw_message
         if prev_msg == raw_message:
             msg_to_save = raw_message + "\u200b"
@@ -2692,12 +3387,12 @@ def send_message():
     pushed_ok = 0
     last_res = ""
     for serial_id, _, _ in rows:
-        last_res = send_apns_push_for_serial(serial_id)
-        if "200 OK" in last_res:
+        last_res = send_apns_push_for_serial(serial_id, notification_body=f"📣 {raw_message}")
+        if "200 OK" in last_res or "Android" in last_res:
             pushed_ok += 1
 
     if target == "all":
-        msg_status = f"📣 Mensaje enviado: {pushed_ok} cliente(s) con iPhone notificados por Push APNs"
+        msg_status = f"📣 Mensaje enviado: {pushed_ok} cliente(s) en iPhone/Android notificados"
         return redirect(url_for("barista", ok=msg_status))
     else:
         target_name = rows[0][1] if rows else target
@@ -2705,15 +3400,13 @@ def send_message():
 
 
 # ---------------------------------------------------------
-# APPLE WALLET WEB SERVICE PROTOCOL (APNs & REST API)
-# Especificación: developer.apple.com/documentation/walletpasses
+# APPLE WALLET WEB SERVICE PROTOCOL & ANDROID WEB PUSH DISPATCHER
 # ---------------------------------------------------------
 
 def is_authorized():
     return request.headers.get("Authorization", "") == f"ApplePass {AUTH_TOKEN}"
 
 
-# 1. Registro del dispositivo (cuando el usuario agrega la tarjeta a su iPhone)
 @app.route("/v1/devices/<device_id>/registrations/<pass_type_id>/<serial_number>", methods=["POST"])
 def register_device(device_id, pass_type_id, serial_number):
     if not is_authorized():
@@ -2741,7 +3434,6 @@ def register_device(device_id, pass_type_id, serial_number):
     return "", (200 if exists else 201)
 
 
-# 2. Baja del dispositivo (cuando el usuario elimina la tarjeta)
 @app.route("/v1/devices/<device_id>/registrations/<pass_type_id>/<serial_number>", methods=["DELETE"])
 def unregister_device(device_id, pass_type_id, serial_number):
     if not is_authorized():
@@ -2757,7 +3449,6 @@ def unregister_device(device_id, pass_type_id, serial_number):
     return "", 200
 
 
-# 3. Lista de pases actualizados para un dispositivo
 @app.route("/v1/devices/<device_id>/registrations/<pass_type_id>", methods=["GET"])
 def get_updated_passes(device_id, pass_type_id):
     since = request.args.get("passesUpdatedSince")
@@ -2782,7 +3473,6 @@ def get_updated_passes(device_id, pass_type_id):
     })
 
 
-# 4. Descarga del pase actualizado (el iPhone baja la versión nueva con los sellos/mensajes/nivel/GPS/strip dinámico)
 @app.route("/v1/passes/<pass_type_id>/<serial_number>", methods=["GET"])
 def get_latest_pass(pass_type_id, serial_number):
     if not is_authorized():
@@ -2833,7 +3523,6 @@ def get_latest_pass(pass_type_id, serial_number):
     return response
 
 
-# 5. Log de errores que reporta el iPhone (útil para depurar)
 @app.route("/v1/log", methods=["POST"])
 def wallet_log():
     logs = (request.get_json(silent=True) or {}).get("logs", [])
@@ -2847,38 +3536,79 @@ def wallet_log():
     return "", 200
 
 
-# 6. Envío de Push a Apple APNs (a todos los iPhones registrados para ese pase, sin duplicados)
-def send_apns_push_for_serial(serial):
+def send_android_webpush(sub_dict, serial, body_text):
+    """Envía notificación Web Push RFC 8291 (VAPID) a un teléfono Android."""
+    try:
+        payload = json.dumps({
+            "title": "Maishas Café ☕️",
+            "body": body_text,
+            "url": f"/card/{serial}",
+            "serial": serial
+        })
+        webpush(
+            subscription_info=sub_dict,
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_PEM,
+            vapid_claims={"sub": "mailto:contacto@maishascafe.com"},
+            timeout=8
+        )
+        return True, 200, "OK"
+    except WebPushException as ex:
+        code = ex.response.status_code if ex.response is not None else 500
+        return False, code, str(ex)
+    except Exception as e:
+        return False, 500, str(e)
+
+
+def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Café se ha actualizado ☕️"):
+    """Despacha notificaciones Push tanto a iPhones (Apple APNs) como a celulares Android (Web Push + Live Sync)."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     raw_tokens = [r[0] for r in c.execute("SELECT push_token FROM registrations WHERE serial = ? AND push_token IS NOT NULL", (serial,)).fetchall()]
-    client_row = c.execute("SELECT push_token FROM clients WHERE serial = ?", (serial,)).fetchone()
+    client_row = c.execute("SELECT push_token, android_active FROM clients WHERE serial = ?", (serial,)).fetchone()
     if client_row and client_row[0]:
         raw_tokens.append(client_row[0])
     reg_tokens = list(dict.fromkeys(t for t in raw_tokens if t))
+    android_active = bool(client_row[1]) if client_row else False
 
-    if not reg_tokens:
-        status_msg = "⏳ Sin iPhone registrado aún"
-        c.execute("UPDATE clients SET last_push_status = ? WHERE serial = ?", (status_msg, serial))
-        conn.commit()
-        conn.close()
-        return status_msg
+    android_subs = c.execute("SELECT endpoint, sub_json FROM android_subscriptions WHERE serial = ?", (serial,)).fetchall()
 
     results = []
+
+    # 1. Enviar a iPhones registrados (Apple APNs HTTP/2)
     for token in reg_tokens:
         ok, status_code, detail = send_apns_push(token)
         if ok:
-            results.append(f"✅ 200 OK ({get_short_time()})")
+            results.append(f" 200 OK ({get_short_time()})")
         else:
-            results.append(f"⚠️ Error {status_code}: {detail}")
+            results.append(f" Error {status_code}")
             if status_code == 410 or "Unregistered" in detail or "BadDeviceToken" in detail:
                 c.execute("DELETE FROM registrations WHERE push_token = ? AND serial = ?", (token, serial))
 
-    summary = " | ".join(results)
-    c.execute("UPDATE clients SET last_push_status = ? WHERE serial = ?", (summary, serial))
+    # 2. Enviar a suscripciones Web Push de Android
+    for endpoint, sub_json_str in android_subs:
+        try:
+            sub_dict = json.loads(sub_json_str)
+            ok_and, code_and, _ = send_android_webpush(sub_dict, serial, notification_body)
+            if ok_and:
+                results.append(f"🤖 Push 200 OK ({get_short_time()})")
+            elif code_and in (404, 410):
+                c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
+        except Exception:
+            pass
+
+    if android_active and not any("🤖" in r for r in results):
+        results.append(f"🤖 Android Live Sync ({get_short_time()})")
+
+    if not results:
+        status_msg = "⏳ Sin dispositivo vinculado aún"
+    else:
+        status_msg = " | ".join(results)
+
+    c.execute("UPDATE clients SET last_push_status = ? WHERE serial = ?", (status_msg, serial))
     conn.commit()
     conn.close()
-    return summary
+    return status_msg
 
 
 def send_apns_push(push_token):
@@ -2901,7 +3631,6 @@ def send_apns_push(push_token):
         return False, 500, str(e)
 
 
-# 7. Diagnóstico interno completo para verificar salud del sistema
 @app.route("/api/diagnostics")
 @requires_auth
 def diagnostics():
@@ -2913,6 +3642,11 @@ def diagnostics():
         },
         "http2_support": False,
         "dynamic_strip_pillow": False,
+        "android_wallet_support": {
+            "vapid_configured": bool(VAPID_PUBLIC_KEY),
+            "qr_generator": True,
+            "pwa_service_worker": True,
+        },
         "apns_connection": None,
         "pass_signing": False,
         "geolocation": get_shop_location(),
@@ -2945,7 +3679,8 @@ def diagnostics():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     report["database"]["total_clients"] = c.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-    report["database"]["total_registrations"] = c.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
+    report["database"]["total_ios_registrations"] = c.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
+    report["database"]["total_android_subscriptions"] = c.execute("SELECT COUNT(*) FROM android_subscriptions").fetchone()[0]
     report["recent_wallet_logs"] = [
         {"time": r[0], "log": r[1]}
         for r in c.execute("SELECT created_at, log_text FROM wallet_logs ORDER BY id DESC LIMIT 20").fetchall()
@@ -2955,6 +3690,6 @@ def diagnostics():
 
 
 if __name__ == "__main__":
-    print("🚀 Servidor con soporte APNs Push iniciado en http://localhost:5001")
+    print("🚀 Servidor con soporte iOS Apple Wallet + Android Wallet Digital iniciado en http://localhost:5001")
     port = int(os.environ.get('PORT', 5001))
     app.run(host="0.0.0.0", port=port, debug=False)
