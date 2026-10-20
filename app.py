@@ -1073,6 +1073,64 @@ ANDROID_CARD_HTML = """
             line-height: 1.45;
         }
 
+        /* Caja Superior Destacada para Guardar en Billetera Android / Google Wallet */
+        .wallet-cta-box {
+            width: 100%;
+            max-width: 410px;
+            background: linear-gradient(160deg, rgba(34, 29, 22, 0.95) 0%, rgba(20, 17, 14, 0.95) 100%);
+            border: 1.5px solid rgba(212, 175, 55, 0.55);
+            border-radius: 20px;
+            padding: 14px 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 14px 34px rgba(0, 0, 0, 0.65), 0 0 22px rgba(212, 175, 55, 0.14);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .wallet-cta-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--gold-light);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .wallet-step-hint {
+            display: none;
+            background: rgba(48, 209, 88, 0.14);
+            border: 1px solid rgba(48, 209, 88, 0.4);
+            color: #66F08B;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-size: 12.5px;
+            line-height: 1.4;
+            font-weight: 600;
+        }
+        .wallet-sub-links {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .btn-mini-intent {
+            flex: 1;
+            min-width: 140px;
+            padding: 9px 11px;
+            border-radius: 11px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-cream);
+            font-size: 12px;
+            font-weight: 600;
+            text-align: center;
+            text-decoration: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
         /* Botones de Acción Android (Notificaciones Push e Instalar en Inicio) */
         .android-actions-stack {
             width: 100%;
@@ -1084,19 +1142,20 @@ ANDROID_CARD_HTML = """
         }
         .btn-action-gold {
             width: 100%;
-            padding: 14px 16px;
+            padding: 15px 16px;
             border-radius: 14px;
-            border: 1px solid rgba(255, 255, 255, 0.18);
-            background: linear-gradient(135deg, #D4AF37 0%, #B38A22 100%);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            background: linear-gradient(135deg, #E2BE52 0%, #B88E24 100%);
             color: #12100E;
-            font-size: 14.5px;
-            font-weight: 700;
+            font-size: 15px;
+            font-weight: 800;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
-            box-shadow: 0 8px 22px rgba(212, 175, 55, 0.25);
+            text-decoration: none;
+            box-shadow: 0 8px 24px rgba(212, 175, 55, 0.3);
         }
         .btn-action-glass {
             width: 100%;
@@ -1134,11 +1193,39 @@ ANDROID_CARD_HTML = """
     <div class="wallet-top-bar">
         <div class="sync-badge">
             <span class="sync-dot"></span>
-            <span id="sync-status-label">🤖 Android Wallet Activo</span>
+            <span id="sync-status-label">🤖 Tarjeta Digital Sincronizada</span>
         </div>
         <button type="button" class="btn-flip" id="btn-flip-toggle" onclick="toggleBackView()">
             ⓘ Detalles / Reverso
         </button>
+    </div>
+
+    <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN BILLETERA ANDROID / GOOGLE WALLET -->
+    <div class="wallet-cta-box">
+        <div class="wallet-cta-title">
+            <span>📲 Guardar en tu App de Billetera</span>
+            <span style="font-size:11px; color:var(--text-muted); font-weight:500;">Android / Wallet</span>
+        </div>
+
+        <a href="/card/{{ client.serial }}/download.pkpass"
+           id="btn-save-wallet-top"
+           class="btn-action-gold"
+           onclick="onSaveToWalletClick()">
+            <span>📲 Agregar a mi Billetera / Wallet</span>
+        </a>
+
+        <div id="wallet-download-hint" class="wallet-step-hint">
+            ✅ <strong>Pase descargado:</strong> Toca <strong>«Abrir»</strong> en la notificación de descarga de tu navegador para guardarlo en tu <strong>Billetera de Google / Android Wallet</strong>.
+        </div>
+
+        <div class="wallet-sub-links">
+            <a id="btn-intent-wallet" href="/card/{{ client.serial }}/download.pkpass" class="btn-mini-intent">
+                ⚡ Abrir directo en App Wallet
+            </a>
+            <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush()" style="border-color:rgba(212,175,55,0.4); color:#E6C280;">
+                🔔 Activar Alertas en Vivo
+            </button>
+        </div>
     </div>
 
     <!-- TARJETA DIGITAL INTERACTIVA -->
@@ -1221,19 +1308,15 @@ ANDROID_CARD_HTML = """
         </div>
     </div>
 
-    <!-- BOTONES DE ACCIÓN EN ANDROID / MULTIPLATAFORMA -->
+    <!-- BOTONES SECUNDARIOS DE ACCIÓN -->
     <div class="android-actions-stack">
-        <button type="button" id="btn-enable-push" class="btn-action-gold" onclick="enableAndroidPush()">
+        <button type="button" id="btn-enable-push" class="btn-action-glass" style="border-color:rgba(212,175,55,0.35); color:#E6C280;" onclick="enableAndroidPush()">
             <span>🔔 Activar Notificaciones Push en mi Celular</span>
         </button>
 
         <button type="button" id="btn-install-pwa" class="btn-action-glass" style="display:none;" onclick="installPWA()">
-            <span>📲 Instalar Tarjeta en Pantalla de Inicio</span>
+            <span>📲 Instalar Acceso Directo en Pantalla de Inicio</span>
         </button>
-
-        <a href="/card/{{ client.serial }}/download.pkpass" class="btn-action-glass">
-            <span> Descargar también para Apple Wallet (.pkpass)</span>
-        </a>
     </div>
 
     <script>
@@ -1248,6 +1331,39 @@ ANDROID_CARD_HTML = """
         let currentMessage = {{ client.message | tojson }};
         let currentTier = {{ client.tier.name | tojson }};
         let showingBack = false;
+
+        // Configurar enlace Intent nativo de Android para apps de Billetera compatibles con .pkpass
+        (function setupAndroidWalletIntent() {
+            const pkpassUrl = `${window.location.origin}/card/${SERIAL}/download.pkpass`;
+            const hostAndPath = pkpassUrl.replace(new RegExp('^https?://'), '');
+            const scheme = window.location.protocol.replace(':', '');
+            const intentHref = `intent://${hostAndPath}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=application/vnd.apple.pkpass;S.browser_fallback_url=${encodeURIComponent(pkpassUrl)};end`;
+            const intentBtn = document.getElementById('btn-intent-wallet');
+            if (intentBtn && /android/i.test(navigator.userAgent || '')) {
+                intentBtn.href = intentHref;
+            }
+        })();
+
+        function onSaveToWalletClick() {
+            const hint = document.getElementById('wallet-download-hint');
+            if (hint) hint.style.display = 'block';
+            showLiveBanner('📲 Descargando pase para tu Billetera. Toca "Abrir" al finalizar.');
+        }
+
+        // Si el cliente acaba de registrarse (?autowallet=1), lanzar automáticamente el archivo .pkpass para su Wallet
+        (function autoTriggerWalletOnRegister() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('autowallet') === '1') {
+                const hint = document.getElementById('wallet-download-hint');
+                if (hint) hint.style.display = 'block';
+                setTimeout(() => {
+                    window.location.href = `/card/${SERIAL}/download.pkpass`;
+                }, 450);
+                if (window.history && window.history.replaceState) {
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                }
+            }
+        })();
 
         function toggleBackView() {
             showingBack = !showingBack;
@@ -1339,6 +1455,7 @@ ANDROID_CARD_HTML = """
 
         async function enableAndroidPush() {
             const btn = document.getElementById('btn-enable-push');
+            const btnTop = document.getElementById('btn-enable-push-top');
             if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
                 showLiveBanner('✅ Sincronización automática en vivo activada en tu navegador.');
                 return;
@@ -1360,10 +1477,18 @@ ANDROID_CARD_HTML = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ subscription: sub.toJSON() })
                 });
-                btn.innerHTML = '<span>✅ Notificaciones Push Activadas en este Android</span>';
-                btn.style.background = 'rgba(48, 209, 88, 0.2)';
-                btn.style.color = '#4AE072';
-                btn.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+                if (btn) {
+                    btn.innerHTML = '<span>✅ Notificaciones Push Activadas en este Android</span>';
+                    btn.style.background = 'rgba(48, 209, 88, 0.2)';
+                    btn.style.color = '#4AE072';
+                    btn.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+                }
+                if (btnTop) {
+                    btnTop.innerHTML = '✅ Alertas Activas';
+                    btnTop.style.background = 'rgba(48, 209, 88, 0.2)';
+                    btnTop.style.color = '#4AE072';
+                    btnTop.style.borderColor = 'rgba(48, 209, 88, 0.45)';
+                }
                 showLiveBanner('🔔 ¡Notificaciones Push activadas! Recibirás alertas de tus sellos y promociones.');
             } catch (err) {
                 showLiveBanner('✅ Tarjeta vinculada y sincronizada en tiempo real.');
@@ -2993,14 +3118,14 @@ def generate_signed_pkpass(
         pass_data["labelColor"] = "rgb(198, 166, 117)"
         pass_data["logoText"] = "MAISHAS CAFÉ"
 
-        pass_data["barcodes"] = [
-            {
-                "format": "PKBarcodeFormatQR",
-                "message": serial_number,
-                "messageEncoding": "iso-8859-1",
-                "altText": serial_number
-            }
-        ]
+        barcode_obj = {
+            "format": "PKBarcodeFormatQR",
+            "message": serial_number,
+            "messageEncoding": "iso-8859-1",
+            "altText": serial_number
+        }
+        pass_data["barcode"] = barcode_obj
+        pass_data["barcodes"] = [barcode_obj]
 
         # Mensaje de notificación inteligente según la acción realizada (evita decir 'ganaste 1 sello' cuando se restó -1)
         if last_action == "sub":
@@ -3072,13 +3197,19 @@ def generate_signed_pkpass(
             "value": f"Nivel: {tier['name']} | Visitas históricas: {visits} | Cafés gratis canjeados: {redeemed_count} ({tier['next_goal']})"
         })
 
+        pass_data["storeCard"]["backFields"].insert(2, {
+            "key": "liveCardLink",
+            "label": "Tarjeta Digital en Vivo (Sellos y Notificaciones)",
+            "value": f"{clean_host}/card/{serial_number}"
+        })
+
         extra_info = []
         if phone:
             extra_info.append(f"Celular: {phone}")
         if birthdate:
             extra_info.append(f"Cumpleaños: {birthdate}")
         if extra_info:
-            pass_data["storeCard"]["backFields"].insert(2, {
+            pass_data["storeCard"]["backFields"].insert(3, {
                 "key": "memberDetails",
                 "label": "Datos del Cliente",
                 "value": " | ".join(extra_info)
@@ -3360,9 +3491,9 @@ def register():
     conn.commit()
     conn.close()
 
-    # Si es Android, redirigir directamente a su Tarjeta Digital Interactiva Android
+    # Si es Android, redirigir a su Tarjeta Digital y lanzar automáticamente la descarga del pase .pkpass para su Wallet
     if platform == "android":
-        return redirect(url_for("android_card_view", serial_number=serial_number))
+        return redirect(url_for("android_card_view", serial_number=serial_number, autowallet="1"))
 
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
@@ -3806,7 +3937,12 @@ def send_message():
 # ---------------------------------------------------------
 
 def is_authorized():
-    return request.headers.get("Authorization", "") == f"ApplePass {AUTH_TOKEN}"
+    auth = request.headers.get("Authorization", "").strip()
+    return auth in (
+        f"ApplePass {AUTH_TOKEN}",
+        f"AndroidPass {AUTH_TOKEN}",
+        f"AttidoPass {AUTH_TOKEN}",
+    ) or auth.endswith(f" {AUTH_TOKEN}")
 
 
 @app.route("/v1/devices/<device_id>/registrations/<pass_type_id>/<serial_number>", methods=["POST"])
@@ -3817,6 +3953,10 @@ def register_device(device_id, pass_type_id, serial_number):
     if not push_token:
         return "", 400
 
+    auth_hdr = request.headers.get("Authorization", "")
+    ua_hdr = (request.headers.get("User-Agent") or "").lower()
+    is_android_wallet_app = auth_hdr.startswith("AndroidPass") or auth_hdr.startswith("AttidoPass") or "android" in ua_hdr or "walletpasses" in ua_hdr
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT 1 FROM registrations WHERE device_id = ? AND serial = ?", (device_id, serial_number))
@@ -3825,14 +3965,20 @@ def register_device(device_id, pass_type_id, serial_number):
         "INSERT OR REPLACE INTO registrations (device_id, push_token, serial) VALUES (?, ?, ?)",
         (device_id, push_token, serial_number)
     )
-    c.execute(
-        "UPDATE clients SET push_token = ?, last_sync_at = ? WHERE serial = ?",
-        (push_token, get_short_time(), serial_number)
-    )
+    if is_android_wallet_app:
+        c.execute(
+            "UPDATE clients SET push_token = ?, android_active = 1, last_sync_at = ? WHERE serial = ?",
+            (push_token, get_short_time(), serial_number)
+        )
+    else:
+        c.execute(
+            "UPDATE clients SET push_token = ?, last_sync_at = ? WHERE serial = ?",
+            (push_token, get_short_time(), serial_number)
+        )
     conn.commit()
     conn.close()
 
-    print(f"📲 iPhone registrado: device={device_id} serial={serial_number}")
+    print(f"📲 Wallet registrado ({'Android' if is_android_wallet_app else 'iPhone'}): device={device_id} serial={serial_number}")
     return "", (200 if exists else 201)
 
 
@@ -3979,7 +4125,7 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
     any_success = False
     any_error = False
 
-    # 1. Enviar a iPhones registrados (Apple APNs HTTP/2)
+    # 1. Enviar a iPhones registrados (Apple APNs HTTP/2) o Apps Android .pkpass (WalletPasses)
     for token in reg_tokens:
         ok, status_code, detail = send_apns_push(token)
         if ok:
@@ -4020,6 +4166,18 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
 
 def send_apns_push(push_token):
     try:
+        # Detectar si el token pertenece a una app Android de .pkpass (ej. WalletPasses FCM token) vs iOS APNs hex token
+        is_ios_hex = len(push_token) in (64, 128) and all(c in "0123456789abcdefABCDEF" for c in push_token)
+        if not is_ios_hex:
+            with httpx.Client(timeout=8.0) as client:
+                res = client.post(
+                    "https://walletpasses.appspot.com/api/v1/push",
+                    json={"passTypeIdentifier": PASS_TYPE_ID, "pushTokens": [push_token]}
+                )
+                if res.status_code in (200, 201, 202, 204):
+                    return True, 200, "OK"
+                return False, res.status_code, res.text
+
         url = f"https://api.push.apple.com/3/device/{push_token}"
         context = ssl.create_default_context()
         context.load_cert_chain(certfile=CERT_PEM, keyfile=KEY_PEM)
