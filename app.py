@@ -1137,7 +1137,7 @@ def get_latest_pass(pass_type_id, serial_number):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count FROM clients WHERE serial = ?",
+        "SELECT name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at FROM clients WHERE serial = ?",
         (serial_number,)
     )
     client = c.fetchone()
@@ -1145,19 +1145,40 @@ def get_latest_pass(pass_type_id, serial_number):
         conn.close()
         return "", 404
 
+    name, stamps, message, phone, birthdate, total_visits, redeemed_count, updated_at_str = client
+
+    # Convertir updated_at a epoch UTC para manejo exacto de Last-Modified e If-Modified-Since
+    try:
+        dt_upd = datetime.strptime(updated_at_str, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+    except Exception:
+        try:
+            dt_upd = datetime.strptime(updated_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            dt_upd = datetime.now(timezone.utc)
+
+    upd_epoch_sec = int(dt_upd.timestamp())
+    ims_header = request.headers.get("If-Modified-Since")
+    if ims_header:
+        from email.utils import parsedate_to_datetime
+        try:
+            ims_dt = parsedate_to_datetime(ims_header)
+            if int(ims_dt.timestamp()) > upd_epoch_sec:
+                conn.close()
+                return "", 304
+        except Exception:
+            pass
+
     # Registrar el momento exacto en que el iPhone descargó la actualización
     c.execute("UPDATE clients SET last_sync_at = ? WHERE serial = ?", (get_short_time(), serial_number))
     conn.commit()
     conn.close()
 
-    name, stamps, message, phone, birthdate, total_visits, redeemed_count = client
     pkpass_path = generate_signed_pkpass(
         serial_number, name, stamps or 0, request.host_url, message,
         phone=phone, birthdate=birthdate, total_visits=total_visits, redeemed_count=redeemed_count or 0
     )
-    # conditional=False y Cache-Control: no-store garantizan que el iPhone siempre reciba HTTP 200 con el pase nuevo
     response = send_file(pkpass_path, mimetype="application/vnd.apple.pkpass", conditional=False, max_age=0)
-    response.headers["Last-Modified"] = formatdate(timeval=None, localtime=False, usegmt=True)
+    response.headers["Last-Modified"] = formatdate(timeval=float(upd_epoch_sec), localtime=False, usegmt=True)
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 
@@ -1176,14 +1197,16 @@ def wallet_log():
     return "", 200
 
 
-# 6. Envío de Push a Apple APNs (a todos los iPhones registrados para ese pase)
+# 6. Envío de Push a Apple APNs (a todos los iPhones registrados para ese pase, sin duplicados)
 def send_apns_push_for_serial(serial):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    reg_tokens = [r[0] for r in c.execute("SELECT push_token FROM registrations WHERE serial = ? AND push_token IS NOT NULL", (serial,)).fetchall()]
+    raw_tokens = [r[0] for r in c.execute("SELECT push_token FROM registrations WHERE serial = ? AND push_token IS NOT NULL", (serial,)).fetchall()]
     client_row = c.execute("SELECT push_token FROM clients WHERE serial = ?", (serial,)).fetchone()
-    if client_row and client_row[0] and client_row[0] not in reg_tokens:
-        reg_tokens.append(client_row[0])
+    if client_row and client_row[0]:
+        raw_tokens.append(client_row[0])
+    # Deduplicar tokens manteniendo el orden para nunca enviar doble push al mismo iPhone
+    reg_tokens = list(dict.fromkeys(t for t in raw_tokens if t))
 
     if not reg_tokens:
         status_msg = "⏳ Sin iPhone registrado aún"
