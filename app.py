@@ -271,10 +271,10 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
 
 
 def _clean_text_for_pil(text):
-    """Limpia emojis fuera de Latin-1 para renderizado nítido con la fuente TrueType de Pillow."""
+    """Limpia emojis y signos invertidos fuera de la fuente básica de Pillow para renderizado nítido."""
     if not text:
         return ""
-    cleaned = "".join(ch for ch in text if 32 <= ord(ch) <= 255)
+    cleaned = "".join(ch for ch in text if 32 <= ord(ch) <= 255 and ch not in ("¡", "¿"))
     return " ".join(cleaned.split()).strip()
 
 
@@ -393,8 +393,8 @@ def _create_dynamic_strip_pil(stamps_count, message=None):
     raw_msg = _clean_text_for_pil((message or DEFAULT_MESSAGE).replace("\u200b", ""))
     if not raw_msg:
         raw_msg = "Bienvenido a Maishas Cafe"
-    reward_txt = "¡CAFE GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Cafe Gratis"
-    banner_text = f"{reward_txt}  •  AVISO: {raw_msg}"
+    reward_txt = "CAFE GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Cafe Gratis"
+    banner_text = f"{reward_txt}  |  AVISO: {raw_msg}"
     if len(banner_text) > 88:
         banner_text = banner_text[:85] + "..."
 
