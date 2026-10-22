@@ -4452,6 +4452,32 @@ def send_apns_push(push_token, push_service_url=None):
         return False, 500, str(e)
 
 
+@app.route("/api/test-android-push/<serial_number>")
+@requires_auth
+def test_android_push(serial_number):
+    """Envía un Web Push de prueba y devuelve el resultado real por cada suscripción (para diagnóstico)."""
+    serial_clean = (serial_number or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    subs = conn.execute(
+        "SELECT endpoint, sub_json, created_at FROM android_subscriptions WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    ).fetchall()
+    row = conn.execute("SELECT stamps FROM clients WHERE UPPER(serial) = ?", (serial_clean,)).fetchone()
+    all_subs = conn.execute("SELECT serial, endpoint, created_at FROM android_subscriptions").fetchall()
+    conn.close()
+    results = []
+    for endpoint, sub_json_str, created_at in subs:
+        ok, code, detail = send_android_webpush(json.loads(sub_json_str), serial_clean, "🔔 Prueba de notificación Maishas Café", stamps=(row[0] if row else 0))
+        results.append({"endpoint_host": endpoint.split("/")[2], "created_at": created_at, "ok": ok, "http_status": code, "detail": detail[:300]})
+    return jsonify({
+        "serial": serial_clean,
+        "client_exists": bool(row),
+        "subscriptions_for_serial": len(subs),
+        "results": results,
+        "all_subscriptions_in_db": [{"serial": s, "host": e.split("/")[2], "created_at": c} for s, e, c in all_subs],
+    })
+
+
 @app.route("/api/diagnostics")
 @requires_auth
 def diagnostics():
