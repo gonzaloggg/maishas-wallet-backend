@@ -6,7 +6,7 @@ from email.utils import formatdate, parsedate_to_datetime
 from PIL import Image, ImageDraw, ImageFont
 import os, io, csv, re, json, base64, hashlib, zipfile, subprocess, uuid, httpx, ssl, sqlite3, tempfile, shutil, math
 import qrcode
-from py_vapid import Vapid01
+from py_vapid import Vapid01, Vapid02
 from pywebpush import webpush, WebPushException
 from cryptography.hazmat.primitives import serialization
 
@@ -4279,6 +4279,12 @@ def wallet_log():
     return "", 200
 
 
+def _get_vapid_signer():
+    """Devuelve un objeto Vapid válido. pywebpush interpreta un str como ruta/base64, NO como PEM,
+    por eso hay que pasar una instancia de Vapid cargada desde el PEM."""
+    return Vapid02.from_pem(VAPID_PRIVATE_PEM.encode("utf-8"))
+
+
 def send_android_webpush(sub_dict, serial, body_text, stamps=None):
     """Envía notificación Web Push RFC 8291 (VAPID) a un teléfono Android con imagen en vivo del pase."""
     try:
@@ -4296,16 +4302,38 @@ def send_android_webpush(sub_dict, serial, body_text, stamps=None):
         webpush(
             subscription_info=sub_dict,
             data=payload,
-            vapid_private_key=VAPID_PRIVATE_PEM,
+            vapid_private_key=_get_vapid_signer(),
             vapid_claims={"sub": "mailto:contacto@maishascafe.com"},
-            timeout=8
+            ttl=86400,
+            headers={"Urgency": "high"},
+            timeout=10
         )
         return True, 200, "OK"
     except WebPushException as ex:
         code = ex.response.status_code if ex.response is not None else 500
-        return False, code, str(ex)
+        detail = f"{ex}"
+        if ex.response is not None:
+            try:
+                detail += f" | {ex.response.text[:200]}"
+            except Exception:
+                pass
+        _log_wallet_event(f"⚠️ Web Push Android falló ({serial}): HTTP {code} {detail[:300]}")
+        return False, code, detail
     except Exception as e:
+        _log_wallet_event(f"⚠️ Web Push Android error interno ({serial}): {str(e)[:300]}")
         return False, 500, str(e)
+
+
+def _log_wallet_event(text):
+    """Guarda un evento de diagnóstico en wallet_logs (visible en /api/diagnostics)."""
+    try:
+        print(text)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT INTO wallet_logs (created_at, log_text) VALUES (?, ?)", (get_utc_timestamp(), text))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Café se ha actualizado ☕️"):
@@ -4351,23 +4379,34 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
                 c.execute("DELETE FROM registrations WHERE push_token = ? AND UPPER(serial) = ?", (token, serial_clean))
 
     # 2. Enviar a suscripciones Web Push de Android (Chrome / PWA)
+    conn.commit()  # liberar el lock de SQLite antes de que send_android_webpush escriba logs
+    android_ok = 0
+    android_fail = 0
+    stale_endpoints = []
     for endpoint, sub_json_str in android_subs:
         try:
             sub_dict = json.loads(sub_json_str)
             ok_and, code_and, _ = send_android_webpush(sub_dict, serial_clean, notification_body, stamps=current_stamps)
             if ok_and:
                 any_success = True
+                android_ok += 1
             else:
                 any_error = True
+                android_fail += 1
                 if code_and in (404, 410):
-                    c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
+                    stale_endpoints.append(endpoint)
         except Exception:
             any_error = True
+            android_fail += 1
+    for endpoint in stale_endpoints:
+        c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
 
     sonora_now = get_short_time()
     if any_success:
         status_msg = f"✅ Notificación enviada ({sonora_now})"
-    elif android_active:
+    elif android_fail and not token_map:
+        status_msg = f"⚠️ Android no recibió el Push ({sonora_now}) · Pídele abrir su tarjeta y tocar «Activar Notificaciones»"
+    elif android_active and not android_subs:
         status_msg = f"🔄 Tarjeta web al día ({sonora_now}) · Falta activar Push en su Android"
     elif any_error:
         status_msg = f"⚠️ No se pudo notificar ({sonora_now})"
