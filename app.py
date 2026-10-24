@@ -1215,12 +1215,26 @@ ANDROID_CARD_HTML = """
             🔔 <strong>Importante en Android:</strong> Al tocar el botón dorado selecciona <strong>«Permitir notificaciones»</strong> para que tus sellos y avisos te lleguen al instante.
         </div>
 
+        {% if gw_enabled %}
+        <a href="/card/{{ client.serial }}/google-wallet"
+           id="btn-google-wallet"
+           class="btn-action-gold"
+           style="background:#000; color:#fff; border:1.5px solid #5f6368; gap:10px;"
+           onclick="onSaveToWalletClick()">
+            <span style="font-size:20px;">🅖</span>
+            <span id="btn-save-wallet-label">Agregar a Google Wallet · {{ client.stamps }}/10 sellos</span>
+        </a>
+        <div style="font-size:11.5px; color:var(--text-muted); text-align:center; line-height:1.4;">
+            Tus sellos y avisos se actualizan solos dentro de Google Wallet, igual que en Apple Wallet.
+        </div>
+        {% else %}
         <a href="/card/{{ client.serial }}/download.pkpass?v={{ client.updated_at | urlencode }}"
            id="btn-save-wallet-top"
            class="btn-action-gold"
            onclick="onSaveToWalletClick()">
             <span id="btn-save-wallet-label">📲 Activar Alertas y Guardar en Wallet ({{ client.stamps }}/10)</span>
         </a>
+        {% endif %}
 
         <div id="wallet-download-hint" class="wallet-step-hint">
             ✅ <strong>Pase {{ client.serial }} descargado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para guardarlo en tu <strong>Billetera</strong>, y toca <strong>«Permitir»</strong> si tu celular te pregunta por las notificaciones.
@@ -3676,7 +3690,8 @@ def android_card_view(serial_number):
         ANDROID_CARD_HTML,
         client=client_data,
         shop_loc=get_shop_location(),
-        vapid_public_key=VAPID_PUBLIC_KEY
+        vapid_public_key=VAPID_PUBLIC_KEY,
+        gw_enabled=google_wallet_enabled()
     )
 
 
@@ -4401,6 +4416,15 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
     for endpoint in stale_endpoints:
         c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
 
+    # 3. Google Wallet (Android): actualizar el pase nativo y enviar el aviso. Solo clientes Android; no afecta a Apple.
+    if google_wallet_enabled() and (android_active or android_subs):
+        conn.commit()
+        try:
+            if google_wallet_push_update(serial_clean, _public_base_url(), message=notification_body):
+                any_success = True
+        except Exception as gw_err:
+            _log_wallet_event(f"⚠️ Google Wallet: error al actualizar {serial_clean}: {str(gw_err)[:200]}")
+
     sonora_now = get_short_time()
     if any_success:
         status_msg = f"✅ Notificación enviada ({sonora_now})"
@@ -4450,6 +4474,298 @@ def send_apns_push(push_token, push_service_url=None):
     except Exception as e:
         print(f"⚠️ Error enviando Push APNs: {e}")
         return False, 500, str(e)
+
+
+# ---------------------------------------------------------
+# GOOGLE WALLET API (ANDROID) — pase nativo que se actualiza solo, equivalente a Apple Wallet
+# Se activa únicamente si existen GOOGLE_WALLET_ISSUER_ID y GOOGLE_WALLET_SERVICE_ACCOUNT_JSON.
+# ---------------------------------------------------------
+GOOGLE_WALLET_ISSUER_ID = (os.environ.get("GOOGLE_WALLET_ISSUER_ID") or "").strip()
+GOOGLE_WALLET_CLASS_SUFFIX = "maishas_loyalty_v1"
+GW_API_BASE = "https://walletobjects.googleapis.com/walletobjects/v1"
+GW_SCOPE = "https://www.googleapis.com/auth/wallet_object.issuer"
+PUBLIC_BASE_URL = (os.environ.get("PUBLIC_BASE_URL") or "https://web-production-98096.up.railway.app").rstrip("/")
+_gw_token_cache = {"token": None, "exp": 0}
+_gw_class_ready = {"ok": False}
+
+
+def _load_google_sa():
+    """Lee la cuenta de servicio de Google (JSON directo o en base64) desde la variable de entorno."""
+    raw = (os.environ.get("GOOGLE_WALLET_SERVICE_ACCOUNT_JSON") or "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            data = json.loads(base64.b64decode(raw).decode("utf-8"))
+        except Exception:
+            return None
+    if not (data.get("client_email") and data.get("private_key")):
+        return None
+    data["private_key"] = data["private_key"].replace("\\n", "\n")
+    return data
+
+
+def google_wallet_enabled():
+    return bool(GOOGLE_WALLET_ISSUER_ID and _load_google_sa())
+
+
+def _public_base_url():
+    try:
+        if request:
+            host = request.host_url.rstrip("/")
+            if "localhost" not in host and "127.0.0.1" not in host:
+                return host.replace("http://", "https://", 1)
+    except Exception:
+        pass
+    return PUBLIC_BASE_URL
+
+
+def _gw_b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _gw_sign_jwt(claims, sa):
+    """JWT RS256 firmado con la llave privada de la cuenta de servicio."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    header = {"alg": "RS256", "typ": "JWT"}
+    signing_input = (
+        _gw_b64url(json.dumps(header, separators=(",", ":")).encode())
+        + "." + _gw_b64url(json.dumps(claims, separators=(",", ":")).encode())
+    )
+    key = serialization.load_pem_private_key(sa["private_key"].encode("utf-8"), password=None)
+    sig = key.sign(signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
+    return signing_input + "." + _gw_b64url(sig)
+
+
+def _gw_http(method, url, headers=None, json_body=None, data=None):
+    with httpx.Client(timeout=15.0) as client:
+        res = client.request(method, url, headers=headers, json=json_body, data=data)
+    try:
+        body = res.json()
+    except Exception:
+        body = {"raw": res.text[:300]}
+    return res.status_code, body
+
+
+def _gw_access_token():
+    now = int(datetime.now(timezone.utc).timestamp())
+    if _gw_token_cache["token"] and _gw_token_cache["exp"] - 60 > now:
+        return _gw_token_cache["token"]
+    sa = _load_google_sa()
+    if not sa:
+        return None
+    assertion = _gw_sign_jwt({
+        "iss": sa["client_email"], "scope": GW_SCOPE,
+        "aud": sa.get("token_uri") or "https://oauth2.googleapis.com/token",
+        "iat": now, "exp": now + 3600
+    }, sa)
+    status, body = _gw_http(
+        "POST", sa.get("token_uri") or "https://oauth2.googleapis.com/token",
+        data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion}
+    )
+    if status != 200 or "access_token" not in body:
+        _log_wallet_event(f"⚠️ Google Wallet: no se pudo obtener token ({status}): {str(body)[:200]}")
+        return None
+    _gw_token_cache["token"] = body["access_token"]
+    _gw_token_cache["exp"] = now + int(body.get("expires_in", 3600))
+    return _gw_token_cache["token"]
+
+
+def _gw_api(method, path, json_body=None):
+    token = _gw_access_token()
+    if not token:
+        return 0, {"error": "sin token de Google (revisa credenciales)"}
+    return _gw_http(method, f"{GW_API_BASE}/{path}", headers={"Authorization": f"Bearer {token}"}, json_body=json_body)
+
+
+def _gw_class_id():
+    return f"{GOOGLE_WALLET_ISSUER_ID}.{GOOGLE_WALLET_CLASS_SUFFIX}"
+
+
+def _gw_object_id(serial):
+    return f"{GOOGLE_WALLET_ISSUER_ID}.{(serial or '').strip().upper()}"
+
+
+def _gw_text(value):
+    return {"defaultValue": {"language": "es-MX", "value": value}}
+
+
+def build_google_loyalty_class(base_url):
+    loc = get_shop_location()
+    return {
+        "id": _gw_class_id(),
+        "issuerName": "Maishas Café",
+        "programName": "Maishas Café · Sellos",
+        "programLogo": {
+            "sourceUri": {"uri": f"{base_url}/card/icon-192.png"},
+            "contentDescription": _gw_text("Maishas Café")
+        },
+        "hexBackgroundColor": "#12100E",
+        "countryCode": "MX",
+        "reviewStatus": "UNDER_REVIEW",
+        "multipleDevicesAndHoldersAllowedStatus": "ONE_USER_ALL_DEVICES",
+        "homepageUri": {"uri": base_url, "description": "Maishas Café"},
+        "locations": [{"latitude": loc["lat"], "longitude": loc["lng"]}],
+    }
+
+
+def build_google_loyalty_object(serial, base_url):
+    """Construye el pase de lealtad de Google con los datos actuales del cliente (sellos, nivel, aviso, strip)."""
+    serial_clean = (serial or "").strip().upper()
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT serial, name, stamps, message, total_visits, updated_at FROM clients WHERE UPPER(serial) = ?",
+        (serial_clean,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    serial_id, name, stamps, message, visits, updated_at = row
+    stamps = max(0, min(10, stamps or 0))
+    tier = get_vip_tier(visits if visits is not None else stamps)
+    reward = "¡CAFÉ GRATIS DISPONIBLE! 🎉" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu café gratis"
+    clean_msg = (message or DEFAULT_MESSAGE).replace("\u200b", "")
+    loc = get_shop_location()
+    version = urllib_quote(str(updated_at or ""))
+    return {
+        "id": _gw_object_id(serial_id),
+        "classId": _gw_class_id(),
+        "state": "ACTIVE",
+        "accountId": serial_id,
+        "accountName": name or "Cliente",
+        "loyaltyPoints": {"label": "SELLOS", "balance": {"string": f"{stamps} / 10"}},
+        "barcode": {"type": "QR_CODE", "value": serial_id, "alternateText": serial_id},
+        "heroImage": {
+            "sourceUri": {"uri": f"{base_url}/card/{serial_id}/strip.png?v={version}"},
+            "contentDescription": _gw_text(f"{stamps} de 10 sellos")
+        },
+        "textModulesData": [
+            {"id": "tier", "header": "NIVEL VIP", "body": tier["name"]},
+            {"id": "reward", "header": "PREMIO", "body": reward},
+            {"id": "promo", "header": "AVISO MAISHAS", "body": clean_msg},
+        ],
+        "linksModuleData": {"uris": [
+            {"id": "live", "uri": f"{base_url}/card/{serial_id}", "description": "Mi tarjeta en vivo"}
+        ]},
+        "locations": [{"latitude": loc["lat"], "longitude": loc["lng"]}],
+    }
+
+
+def urllib_quote(text):
+    from urllib.parse import quote
+    return quote(text, safe="")
+
+
+def ensure_google_class(base_url):
+    """Crea o actualiza la clase de lealtad (una sola para todos los clientes)."""
+    body = build_google_loyalty_class(base_url)
+    status, resp = _gw_api("GET", f"loyaltyClass/{_gw_class_id()}")
+    if status == 404:
+        status, resp = _gw_api("POST", "loyaltyClass", body)
+    elif status == 200:
+        patch = {k: v for k, v in body.items() if k not in ("id", "reviewStatus")}
+        status, resp = _gw_api("PATCH", f"loyaltyClass/{_gw_class_id()}", patch)
+    ok = status in (200, 201)
+    _gw_class_ready["ok"] = ok
+    if not ok:
+        _log_wallet_event(f"⚠️ Google Wallet: error con la clase ({status}): {str(resp)[:250]}")
+    return ok, status, resp
+
+
+def ensure_google_object(serial, base_url):
+    """Crea el pase del cliente en Google (si no existe) o lo actualiza con sus datos actuales."""
+    obj = build_google_loyalty_object(serial, base_url)
+    if not obj:
+        return False, 404, {"error": "cliente no encontrado"}
+    if not _gw_class_ready["ok"]:
+        ok, st, resp = ensure_google_class(base_url)
+        if not ok:
+            return False, st, resp
+    status, resp = _gw_api("GET", f"loyaltyObject/{obj['id']}")
+    if status == 404:
+        status, resp = _gw_api("POST", "loyaltyObject", obj)
+    elif status == 200:
+        patch = {k: v for k, v in obj.items() if k not in ("id", "classId")}
+        status, resp = _gw_api("PATCH", f"loyaltyObject/{obj['id']}", patch)
+    ok = status in (200, 201)
+    if not ok:
+        _log_wallet_event(f"⚠️ Google Wallet: error con el pase de {serial} ({status}): {str(resp)[:250]}")
+    return ok, status, resp
+
+
+def google_wallet_save_url(serial, base_url):
+    """Link 'Agregar a Google Wallet' firmado (JWT corto: solo referencia el id del pase ya creado)."""
+    ok, status, resp = ensure_google_object(serial, base_url)
+    if not ok:
+        return None, f"Google respondió {status}: {str(resp)[:200]}"
+    sa = _load_google_sa()
+    now = int(datetime.now(timezone.utc).timestamp())
+    claims = {
+        "iss": sa["client_email"], "aud": "google", "typ": "savetowallet", "iat": now,
+        "origins": [base_url],
+        "payload": {"loyaltyObjects": [{"id": _gw_object_id(serial)}]},
+    }
+    return f"https://pay.google.com/gp/v/save/{_gw_sign_jwt(claims, sa)}", None
+
+
+def google_wallet_push_update(serial, base_url, message=None, notify=True):
+    """Actualiza el pase del cliente en Google Wallet y, si hay mensaje, envía el aviso al teléfono."""
+    if not google_wallet_enabled():
+        return False
+    serial_clean = (serial or "").strip().upper()
+    obj_id = _gw_object_id(serial_clean)
+    status, _ = _gw_api("GET", f"loyaltyObject/{obj_id}")
+    if status != 200:
+        return False  # el cliente aún no ha agregado su pase a Google Wallet
+    ok, st, _ = ensure_google_object(serial_clean, base_url)
+    if not ok:
+        return False
+    if message and notify:
+        st2, resp2 = _gw_api("POST", f"loyaltyObject/{obj_id}/addMessage", {
+            "message": {
+                "header": "Maishas Café ☕️",
+                "body": message[:180],
+                "messageType": "TEXT_AND_NOTIFY",
+            }
+        })
+        if st2 not in (200, 201):
+            _log_wallet_event(f"⚠️ Google Wallet: aviso no enviado a {serial_clean} ({st2}): {str(resp2)[:200]}")
+    return True
+
+
+@app.route("/card/<serial_number>/google-wallet")
+def google_wallet_save(serial_number):
+    """Redirige al botón oficial 'Agregar a Google Wallet' del cliente."""
+    if not google_wallet_enabled():
+        return "Google Wallet aún no está configurado en el servidor.", 503
+    serial_clean = (serial_number or "").strip().upper()
+    url, err = google_wallet_save_url(serial_clean, _public_base_url())
+    if not url:
+        return f"No se pudo generar el pase de Google Wallet. {err}", 502
+    _log_wallet_event(f"🟢 Google Wallet: enlace de guardado generado para {serial_clean}")
+    return redirect(url)
+
+
+@app.route("/api/google-wallet/setup")
+@requires_auth
+def google_wallet_setup_check():
+    """Verifica las credenciales de Google Wallet y crea/actualiza la clase de lealtad."""
+    sa = _load_google_sa()
+    info = {
+        "issuer_id_configurado": bool(GOOGLE_WALLET_ISSUER_ID),
+        "cuenta_servicio_valida": bool(sa),
+        "cuenta_servicio_email": sa["client_email"] if sa else None,
+        "habilitado": google_wallet_enabled(),
+    }
+    if info["habilitado"]:
+        ok, status, resp = ensure_google_class(_public_base_url())
+        info["clase_ok"] = ok
+        info["clase_http"] = status
+        info["clase_detalle"] = resp if not ok else {"id": _gw_class_id()}
+    return jsonify(info)
 
 
 @app.route("/api/test-android-push/<serial_number>")
