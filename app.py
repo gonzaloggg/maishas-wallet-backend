@@ -4659,14 +4659,14 @@ def urllib_quote(text):
     return quote(text, safe="")
 
 
-def ensure_google_class(base_url):
+def ensure_google_class(base_url, force_update=False):
     """Crea o actualiza la clase de lealtad (una sola para todos los clientes)."""
     body = build_google_loyalty_class(base_url)
     status, resp = _gw_api("GET", f"loyaltyClass/{_gw_class_id()}")
     if status == 404:
         status, resp = _gw_api("POST", "loyaltyClass", body)
-    elif status == 200:
-        patch = {k: v for k, v in body.items() if k not in ("id", "reviewStatus")}
+    elif status == 200 and force_update:
+        patch = {k: v for k, v in body.items() if k != "id"}
         status, resp = _gw_api("PATCH", f"loyaltyClass/{_gw_class_id()}", patch)
     ok = status in (200, 201)
     _gw_class_ready["ok"] = ok
