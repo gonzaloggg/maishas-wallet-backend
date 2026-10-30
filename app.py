@@ -2613,9 +2613,9 @@ BARISTA_HTML = """
                 <button type="button" id="nav-btn-db" class="nav-tab-btn" onclick="switchMainView('db')">
                     📊 Base de Datos ({{ clients|length }})
                 </button>
-                <a href="/api/export-clients.csv" class="btn-export-csv" title="Descargar machote de clientes en formato Excel (.CSV)">
-                    📥 Descargar Machote Excel
-                </a>
+                <button type="button" class="btn-export-csv" onclick="downloadClientsCsv(this)" title="Descargar lista de clientes (.CSV para Excel)">
+                    📥 Descargar Clientes
+                </button>
                 <button type="button" id="btn-install-barista-pwa" class="nav-tab-btn" onclick="installBaristaPwa()" style="border-color:rgba(212,175,55,0.45); color:var(--gold-light);">
                     📲 Instalar App
                 </button>
@@ -3036,9 +3036,9 @@ BARISTA_HTML = """
                     </p>
                 </div>
                 <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                    <a href="/api/export-clients.csv" class="btn-export-csv">
-                        📥 Descargar Machote de Clientes (.CSV para Excel)
-                    </a>
+                    <button type="button" class="btn-export-csv" onclick="downloadClientsCsv(this)">
+                        📥 Descargar Clientes (.CSV)
+                    </button>
                 </div>
             </div>
 
@@ -3454,6 +3454,47 @@ BARISTA_HTML = """
                 deferredBaristaPrompt = null;
             } else {
                 document.getElementById('maishas-pwa-modal').classList.add('open');
+            }
+        }
+
+        async function downloadClientsCsv(btnEl) {
+            const origText = btnEl ? btnEl.innerHTML : '';
+            try {
+                if (btnEl) btnEl.innerHTML = '⏳ Descargando...';
+                const res = await fetch('/api/export-clients.csv', { credentials: 'include' });
+                if (!res.ok) throw new Error('Error al generar archivo');
+                const blob = await res.blob();
+                const today = new Date().toISOString().slice(0, 10);
+                const filename = `Clientes_MaishasCafe_${today}.csv`;
+
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
+                if (isMobile && navigator.canShare) {
+                    const file = new File([blob], filename, { type: 'text/csv;charset=utf-8' });
+                    if (navigator.canShare({ files: [file] })) {
+                        await navigator.share({
+                            files: [file],
+                            title: 'Clientes Maishas Café'
+                        });
+                        if (btnEl) btnEl.innerHTML = origText;
+                        return;
+                    }
+                }
+
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 1500);
+            } catch (err) {
+                // Si el usuario cancela el menú compartir en iOS/Android (AbortError), no hacer nada
+            } finally {
+                if (btnEl) btnEl.innerHTML = origText;
             }
         }
     </script>
