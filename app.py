@@ -2899,7 +2899,8 @@ BARISTA_HTML = """
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="reset">
                             <button type="button" class="btn-redeem-glow"
-                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                    data-name="{{ client.name|e }}"
+                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', this.dataset.name, '{{ client.serial }}', {{ client.stamps }})">
                                 🎁 Canjear Café
                             </button>
                         </form>
@@ -2908,7 +2909,8 @@ BARISTA_HTML = """
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="reset">
                             <button type="button" class="btn-redeem-normal"
-                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                    data-name="{{ client.name|e }}"
+                                    onclick="openConfirmModal('redeem', 'form-redeem-{{ client.serial }}', this.dataset.name, '{{ client.serial }}', {{ client.stamps }})">
                                 🎁 Canjear
                             </button>
                         </form>
@@ -2919,19 +2921,21 @@ BARISTA_HTML = """
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <input type="hidden" name="action" value="sub">
                             <button type="button" class="btn-icon-sec" title="Restar 1 sello"
-                                    onclick="openConfirmModal('sub', 'form-sub-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                    data-name="{{ client.name|e }}"
+                                    onclick="openConfirmModal('sub', 'form-sub-{{ client.serial }}', this.dataset.name, '{{ client.serial }}', {{ client.stamps }})">
                                 -1
                             </button>
                         </form>
                         {% endif %}
 
                         <a href="/card/{{ client.serial }}" target="_blank" class="btn-icon-sec" title="Abrir Tarjeta Digital de {{ client.name }}">📲</a>
-                        <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name|e }}')">💬</button>
+                        <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" data-name="{{ client.name|e }}" onclick="selectClientForPush('{{ client.serial }}', this.dataset.name)">💬</button>
 
                         <form id="form-del-{{ client.serial }}" action="/api/delete-client" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
                             <button type="button" class="btn-icon-sec btn-icon-del" title="Eliminar registro"
-                                    onclick="openConfirmModal('delete', 'form-del-{{ client.serial }}', '{{ client.name|e }}', '{{ client.serial }}', {{ client.stamps }})">
+                                    data-name="{{ client.name|e }}"
+                                    onclick="openConfirmModal('delete', 'form-del-{{ client.serial }}', this.dataset.name, '{{ client.serial }}', {{ client.stamps }})">
                                 🗑️
                             </button>
                         </form>
@@ -2999,7 +3003,7 @@ BARISTA_HTML = """
                                             🎁 Enviar Regalo Push
                                         </button>
                                     </form>
-                                    <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" onclick="selectClientForPush('{{ bclient.serial }}', '{{ bclient.name|e }}')">💬</button>
+                                    <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" data-name="{{ bclient.name|e }}" onclick="selectClientForPush('{{ bclient.serial }}', this.dataset.name)">💬</button>
                                 </div>
                             </div>
                             {% else %}
@@ -3046,7 +3050,7 @@ BARISTA_HTML = """
                                                 🎁 Felicitación
                                             </button>
                                         </form>
-                                        <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name|e }}')">💬</button>
+                                        <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" data-name="{{ client.name|e }}" onclick="selectClientForPush('{{ client.serial }}', this.dataset.name)">💬</button>
                                     </div>
                                 </div>
                                 {% endif %}
@@ -3261,6 +3265,32 @@ BARISTA_HTML = """
             }, 6500);
         }
 
+        function escapeHtml(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Protección anti doble clic en formularios de sellos y acciones
+        document.addEventListener('submit', function(e) {
+            const form = e.target;
+            if (!form || form.tagName !== 'FORM') return;
+            if (form.dataset.submitting === '1') {
+                e.preventDefault();
+                return false;
+            }
+            form.dataset.submitting = '1';
+            const btn = form.querySelector('button[type="submit"]');
+            if (btn) {
+                btn.style.opacity = '0.7';
+                btn.style.pointerEvents = 'none';
+            }
+            setTimeout(() => { form.dataset.submitting = '0'; }, 6000);
+        });
+
         // Cambio entre las 4 pestañas principales: Mostrador POS, Cumpleañeros, Alertas Push y Base de Datos
         function switchMainView(view) {
             const views = {
@@ -3288,6 +3318,8 @@ BARISTA_HTML = """
         let pendingFormId = null;
         function openConfirmModal(actionType, formId, clientName, serial, currentStamps) {
             pendingFormId = formId;
+            const safeName = escapeHtml(clientName);
+            const safeSerial = escapeHtml(serial);
             const modal = document.getElementById('maishas-confirm-modal');
             const iconBox = document.getElementById('cm-icon-box');
             const titleEl = document.getElementById('cm-title-text');
@@ -3298,7 +3330,7 @@ BARISTA_HTML = """
                 iconBox.className = 'cm-icon danger';
                 iconBox.textContent = '🗑️';
                 titleEl.textContent = '¿Eliminar cliente?';
-                descEl.innerHTML = 'Estás por eliminar permanentemente a <strong>' + clientName + '</strong> (' + serial + '). Esta acción no se puede deshacer.';
+                descEl.innerHTML = 'Estás por eliminar permanentemente a <strong>' + safeName + '</strong> (' + safeSerial + '). Esta acción no se puede deshacer.';
                 confirmBtn.className = 'cm-btn-confirm danger';
                 confirmBtn.textContent = 'Sí, eliminar';
             } else if (actionType === 'sub') {
@@ -3306,14 +3338,14 @@ BARISTA_HTML = """
                 iconBox.className = 'cm-icon warn';
                 iconBox.textContent = '☕️';
                 titleEl.textContent = '¿Corregir sellos (-1)?';
-                descEl.innerHTML = '¿Estás seguro de quitar 1 sello a <strong>' + clientName + '</strong>? Su tarjeta pasará de <strong>' + currentStamps + ' / 10</strong> a <strong>' + nextStamps + ' / 10</strong> sellos.';
+                descEl.innerHTML = '¿Estás seguro de quitar 1 sello a <strong>' + safeName + '</strong>? Su tarjeta pasará de <strong>' + currentStamps + ' / 10</strong> a <strong>' + nextStamps + ' / 10</strong> sellos.';
                 confirmBtn.className = 'cm-btn-confirm warn';
                 confirmBtn.textContent = 'Sí, restar 1 sello';
             } else if (actionType === 'redeem') {
                 iconBox.className = 'cm-icon success';
                 iconBox.textContent = '🎁';
                 titleEl.textContent = '¿Canjear Café Gratis?';
-                descEl.innerHTML = 'Se entregará 1 Café Gratis a <strong>' + clientName + '</strong> y su tarjeta se reiniciará a <strong>0 / 10</strong> sellos.';
+                descEl.innerHTML = 'Se entregará 1 Café Gratis a <strong>' + safeName + '</strong> y su tarjeta se reiniciará a <strong>0 / 10</strong> sellos.';
                 confirmBtn.className = 'cm-btn-confirm success';
                 confirmBtn.textContent = 'Sí, canjear café';
             }
@@ -3530,8 +3562,10 @@ BARISTA_HTML = """
                         inversionAttempts: 'dontInvert'
                     });
                     if (code && code.data) {
-                        const detected = code.data.trim().toUpperCase();
-                        if (detected.startsWith('MAISHAS-')) {
+                        const rawScan = code.data.trim().toUpperCase();
+                        const matchSerial = rawScan.match(/MAISHAS-[A-Z0-9]{6}/);
+                        const detected = matchSerial ? matchSerial[0] : (rawScan.startsWith('MAISHAS-') ? rawScan : '');
+                        if (detected) {
                             playBeep();
                             if (flash) {
                                 flash.style.opacity = '1';
@@ -4521,7 +4555,14 @@ def android_card_state(serial_number):
 
 def _perform_stamp_update(serial, action="add"):
     """Función auxiliar compartida entre el botón de la tabla y el escáner QR."""
-    serial_clean = (serial or "").strip().upper()
+    raw_s = (serial or "").strip().upper()
+    m_ser = re.search(r"MAISHAS-[A-Z0-9]{6}", raw_s)
+    if m_ser:
+        serial_clean = m_ser.group(0)
+    elif re.fullmatch(r"[A-Z0-9]{6}", raw_s):
+        serial_clean = f"MAISHAS-{raw_s}"
+    else:
+        serial_clean = raw_s
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
