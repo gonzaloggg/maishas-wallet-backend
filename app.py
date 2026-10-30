@@ -15,23 +15,175 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 
+BARISTA_COOKIE_NAME = "maishas_barista_auth"
+
+
+def _barista_expected_token():
+    pw = os.environ.get("BARISTA_PASSWORD", "cafe2026")
+    return hashlib.sha256(f"maishas-barista-session:{pw}".encode("utf-8")).hexdigest()
+
+
 def check_auth(username, password):
-    return username == 'maishas' and password == os.environ.get('BARISTA_PASSWORD', 'cafe2026')
+    u = (username or "").strip().lower()
+    p = (password or "").strip()
+    return u == "maishas" and p == os.environ.get("BARISTA_PASSWORD", "cafe2026")
 
 
-def authenticate():
-    return Response(
-        'Acceso Denegado. Ingresa las credenciales del panel.',
-        401,
-        {'WWW-Authenticate': 'Basic realm="Login Panel Barista"'}
-    )
+def is_barista_authenticated():
+    cookie_val = request.cookies.get(BARISTA_COOKIE_NAME, "")
+    if cookie_val and cookie_val == _barista_expected_token():
+        return True
+    auth = request.authorization
+    if auth and check_auth(auth.username, auth.password):
+        return True
+    return False
+
+
+BARISTA_LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Maishas Café — Barista POS</title>
+    <meta name="theme-color" content="#0D0C0B">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Barista POS">
+    <link rel="manifest" href="/barista/manifest.webmanifest" crossorigin="use-credentials">
+    <link rel="apple-touch-icon" href="/barista/icon-512.png">
+    <link rel="icon" type="image/png" href="/card/icon-192.png">
+    <style>
+        :root {
+            --bg-canvas: #0D0C0B;
+            --gold: #D4AF37;
+            --gold-light: #E6C280;
+            --text-primary: #F5F2EB;
+            --text-secondary: #A8A096;
+            --border-subtle: rgba(255, 255, 255, 0.1);
+        }
+        * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+            background-color: var(--bg-canvas);
+            background-image:
+                radial-gradient(circle at 50% 0%, rgba(212, 175, 55, 0.15) 0%, transparent 55%),
+                radial-gradient(circle at 85% 90%, rgba(198, 166, 117, 0.08) 0%, transparent 45%);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+        .login-card {
+            width: 100%;
+            max-width: 380px;
+            background: linear-gradient(165deg, #1C1916 0%, #12100E 100%);
+            border: 1px solid rgba(212, 175, 55, 0.32);
+            border-radius: 24px;
+            padding: 30px 24px 26px;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            text-align: center;
+        }
+        .login-emblem {
+            width: 56px;
+            height: 56px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #D4AF37 0%, #8F6B1A 100%);
+            color: #12100E;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            margin: 0 auto 14px;
+            box-shadow: 0 8px 22px rgba(212, 175, 55, 0.28);
+        }
+        .login-title {
+            margin: 0 0 6px;
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.3px;
+        }
+        .login-sub {
+            margin: 0 0 22px;
+            font-size: 13.5px;
+            color: var(--text-secondary);
+        }
+        .login-field {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid var(--border-subtle);
+            border-radius: 13px;
+            padding: 13px 14px;
+            color: var(--text-primary);
+            font-size: 15px;
+            margin-bottom: 12px;
+            outline: none;
+        }
+        .login-field:focus {
+            border-color: var(--gold);
+            box-shadow: 0 0 0 3px rgba(212, 175, 55, 0.18);
+        }
+        .login-btn {
+            width: 100%;
+            border: none;
+            border-radius: 13px;
+            padding: 14px 16px;
+            margin-top: 6px;
+            background: linear-gradient(135deg, #E6C280 0%, #D4AF37 55%, #AA7C11 100%);
+            color: #12100E;
+            font-size: 15px;
+            font-weight: 800;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(212, 175, 55, 0.25);
+        }
+        .login-error {
+            background: rgba(255, 55, 95, 0.15);
+            border: 1px solid rgba(255, 55, 95, 0.4);
+            color: #FF859D;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="login-emblem">☕️</div>
+        <h1 class="login-title">Iniciar sesión</h1>
+        <p class="login-sub">Maishas Café · Consola Barista</p>
+        {% if error %}
+        <div class="login-error">{{ error }}</div>
+        {% endif %}
+        <form action="/barista/login" method="POST">
+            <input type="text" name="username" class="login-field" placeholder="Nombre de usuario" autocomplete="username" autocapitalize="none" required autofocus>
+            <input type="password" name="password" class="login-field" placeholder="Contraseña" autocomplete="current-password" required>
+            <button type="submit" class="login-btn">Iniciar sesión</button>
+        </form>
+    </div>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+def authenticate(error=None):
+    return Response(render_template_string(BARISTA_LOGIN_HTML, error=error), status=200, mimetype="text/html")
 
 
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
+        if not is_barista_authenticated():
             return authenticate()
         return f(*args, **kwargs)
     return decorated
@@ -3535,6 +3687,34 @@ def index():
     return render_template_string(REGISTRATION_HTML)
 
 
+@app.route("/barista/login", methods=["GET", "POST"])
+def barista_login():
+    if request.method == "GET":
+        if is_barista_authenticated():
+            return redirect("/barista")
+        return authenticate()
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    if check_auth(username, password):
+        resp = redirect("/barista")
+        resp.set_cookie(
+            BARISTA_COOKIE_NAME,
+            _barista_expected_token(),
+            max_age=31536000,
+            httponly=True,
+            samesite="Lax"
+        )
+        return resp
+    return authenticate(error="Usuario o contraseña incorrectos.")
+
+
+@app.route("/barista/logout")
+def barista_logout():
+    resp = redirect("/barista")
+    resp.delete_cookie(BARISTA_COOKIE_NAME)
+    return resp
+
+
 @app.route("/barista")
 @requires_auth
 def barista():
@@ -3630,7 +3810,7 @@ def barista():
 
     upcoming_birthdays.sort(key=lambda x: x["bday"]["days_until"])
 
-    return render_template_string(
+    html_out = render_template_string(
         BARISTA_HTML,
         clients=clients,
         upcoming_birthdays=upcoming_birthdays,
@@ -3644,6 +3824,15 @@ def barista():
         ok=request.args.get("ok"),
         updated_serial=request.args.get("updated")
     )
+    resp = Response(html_out, mimetype="text/html")
+    resp.set_cookie(
+        BARISTA_COOKIE_NAME,
+        _barista_expected_token(),
+        max_age=31536000,
+        httponly=True,
+        samesite="Lax"
+    )
+    return resp
 
 
 @app.route("/api/export-clients.csv")
