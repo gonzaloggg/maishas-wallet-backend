@@ -4994,14 +4994,10 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
     for endpoint in stale_endpoints:
         c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
 
-    # 3. Google Wallet (Android): actualizar el pase nativo y enviar el aviso. Solo clientes Android; no afecta a Apple.
-    if google_wallet_enabled() and (android_active or android_subs):
-        conn.commit()
-        try:
-            if google_wallet_push_update(serial_clean, _public_base_url(), message=notification_body):
-                any_success = True
-        except Exception as gw_err:
-            _log_wallet_event(f"⚠️ Google Wallet: error al actualizar {serial_clean}: {str(gw_err)[:200]}")
+    # 3. Google Wallet (Android): activar actualización y aviso nativo en segundo plano. No afecta a Apple.
+    gw_should_push = google_wallet_enabled() and (android_active or android_subs or not token_map)
+    if gw_should_push and (android_active or android_subs):
+        any_success = True
 
     sonora_now = get_short_time()
     if any_success:
@@ -5018,6 +5014,13 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
     c.execute("UPDATE clients SET last_push_status = ? WHERE UPPER(serial) = ?", (status_msg, serial_clean))
     conn.commit()
     conn.close()
+
+    if gw_should_push:
+        try:
+            google_wallet_push_update(serial_clean, _public_base_url(), message=notification_body, notify=True)
+        except Exception as gw_err:
+            _log_wallet_event(f"⚠️ Google Wallet: error al actualizar {serial_clean}: {str(gw_err)[:200]}")
+
     return status_msg
 
 
@@ -5256,7 +5259,7 @@ def ensure_google_class(base_url, force_update=False):
     return ok, status, resp
 
 
-def ensure_google_object(serial, base_url):
+def ensure_google_object(serial, base_url, notify_on_update=False):
     """Crea el pase del cliente en Google (si no existe) o lo actualiza con sus datos actuales."""
     obj = build_google_loyalty_object(serial, base_url)
     if not obj:
@@ -5270,6 +5273,8 @@ def ensure_google_object(serial, base_url):
         status, resp = _gw_api("POST", "loyaltyObject", obj)
     elif status == 200:
         patch = {k: v for k, v in obj.items() if k not in ("id", "classId")}
+        if notify_on_update:
+            patch["notifyPreference"] = "NOTIFY_ON_UPDATE"
         status, resp = _gw_api("PATCH", f"loyaltyObject/{obj['id']}", patch)
     ok = status in (200, 201)
     if not ok:
@@ -5296,28 +5301,44 @@ def google_wallet_save_url(serial, base_url):
     return f"https://pay.google.com/gp/v/save/{_gw_sign_jwt(claims, sa)}", None
 
 
+def _google_wallet_push_worker(serial_clean, base_url, message=None, notify=True):
+    """Hilo en segundo plano que actualiza el pase en Google Wallet y envía la notificación nativa de Wallet."""
+    import time
+    time.sleep(0.15)
+    try:
+        obj_id = _gw_object_id(serial_clean)
+        ok, st, _ = ensure_google_object(serial_clean, base_url, notify_on_update=True)
+        if message and notify:
+            msg_id = f"msg_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+            st2, resp2 = _gw_api("POST", f"loyaltyObject/{obj_id}/addMessage", {
+                "message": {
+                    "id": msg_id,
+                    "header": "Maishas Café ☕️",
+                    "body": message[:180],
+                    "messageType": "TEXT_AND_NOTIFY",
+                }
+            })
+            if st2 in (200, 201):
+                _log_wallet_event(f"🟢 Google Wallet: pase y notificación enviados a {serial_clean}")
+            else:
+                _log_wallet_event(f"⚠️ Google Wallet: aviso no enviado a {serial_clean} ({st2}): {str(resp2)[:200]}")
+        elif ok:
+            _log_wallet_event(f"🟢 Google Wallet: pase sincronizado para {serial_clean}")
+    except Exception as e:
+        _log_wallet_event(f"⚠️ Google Wallet: error en worker para {serial_clean}: {str(e)[:200]}")
+
+
 def google_wallet_push_update(serial, base_url, message=None, notify=True):
-    """Actualiza el pase del cliente en Google Wallet y, si hay mensaje, envía el aviso al teléfono."""
+    """Lanza la actualización y alerta nativa de Google Wallet en segundo plano sin bloquear el servidor."""
     if not google_wallet_enabled():
         return False
     serial_clean = (serial or "").strip().upper()
-    obj_id = _gw_object_id(serial_clean)
-    status, _ = _gw_api("GET", f"loyaltyObject/{obj_id}")
-    if status != 200:
-        return False  # el cliente aún no ha agregado su pase a Google Wallet
-    ok, st, _ = ensure_google_object(serial_clean, base_url)
-    if not ok:
-        return False
-    if message and notify:
-        st2, resp2 = _gw_api("POST", f"loyaltyObject/{obj_id}/addMessage", {
-            "message": {
-                "header": "Maishas Café ☕️",
-                "body": message[:180],
-                "messageType": "TEXT_AND_NOTIFY",
-            }
-        })
-        if st2 not in (200, 201):
-            _log_wallet_event(f"⚠️ Google Wallet: aviso no enviado a {serial_clean} ({st2}): {str(resp2)[:200]}")
+    import threading
+    threading.Thread(
+        target=_google_wallet_push_worker,
+        args=(serial_clean, base_url, message, notify),
+        daemon=True
+    ).start()
     return True
 
 
