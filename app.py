@@ -1584,8 +1584,16 @@ BARISTA_HTML = """
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Maishas Café — POS & Loyalty Console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Maishas Café — Barista POS</title>
+    <meta name="theme-color" content="#0D0C0B">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Barista POS">
+    <link rel="manifest" href="/barista/manifest.webmanifest" crossorigin="use-credentials">
+    <link rel="apple-touch-icon" href="/barista/icon-512.png">
+    <link rel="icon" type="image/png" href="/card/icon-192.png">
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <style>
         :root {
@@ -1681,7 +1689,7 @@ BARISTA_HTML = """
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border-bottom: 1px solid var(--border-subtle);
-            padding: 12px 24px;
+            padding: calc(12px + env(safe-area-inset-top, 0px)) 24px 12px;
         }
         .header-inner {
             max-width: 1280px;
@@ -2398,6 +2406,31 @@ BARISTA_HTML = """
         </div>
     </div>
 
+    <!-- MODAL DE INSTALACIÓN PWA (iPhone / iPad / Android / Tablet) -->
+    <div class="custom-modal-backdrop" id="maishas-pwa-modal">
+        <div class="custom-modal-box" style="max-width:450px; text-align:left;">
+            <div style="text-align:center;">
+                <div class="cm-icon warn" style="font-size:26px;">📲</div>
+                <div class="cm-brand">Maishas Café · App Barista POS</div>
+                <h3 class="cm-title">Instalar en tu Teléfono o Tablet</h3>
+                <p class="cm-desc" style="margin-bottom:14px;">Agrega la consola a tu pantalla de inicio para abrirla a pantalla completa como aplicación nativa:</p>
+            </div>
+            <div style="background:rgba(255,255,255,0.04); border:1px solid var(--border-subtle); border-radius:14px; padding:12px 14px; margin-bottom:10px; font-size:13px; line-height:1.5; color:var(--text-primary);">
+                <strong style="color:var(--gold-light);">🍎 En iPhone o iPad (Safari):</strong><br>
+                1. Toca el botón <strong>Compartir</strong> <span style="display:inline-block; padding:1px 6px; border-radius:6px; background:rgba(255,255,255,0.12);">⬆️</span> en la barra de Safari.<br>
+                2. Selecciona <strong>«Agregar a pantalla de inicio»</strong> (➕) y toca <strong>Agregar</strong>.
+            </div>
+            <div style="background:rgba(255,255,255,0.04); border:1px solid var(--border-subtle); border-radius:14px; padding:12px 14px; margin-bottom:18px; font-size:13px; line-height:1.5; color:var(--text-primary);">
+                <strong style="color:#30D158;">🤖 En Android o Tablet (Chrome):</strong><br>
+                1. Toca los <strong>3 puntitos (⋮)</strong> arriba a la derecha en Chrome.<br>
+                2. Toca <strong>«Instalar aplicación»</strong> o <strong>«Agregar a la pantalla principal»</strong>.
+            </div>
+            <div class="cm-actions" style="grid-template-columns:1fr;">
+                <button type="button" class="cm-btn-confirm warn" onclick="document.getElementById('maishas-pwa-modal').classList.remove('open')">Entendido</button>
+            </div>
+        </div>
+    </div>
+
     <header class="sticky-header">
         <div class="header-inner">
             <div class="brand-Cluster">
@@ -2419,6 +2452,9 @@ BARISTA_HTML = """
                 <a href="/api/export-clients.csv" class="btn-export-csv" title="Descargar machote de clientes en formato Excel (.CSV)">
                     📥 Descargar Machote Excel
                 </a>
+                <button type="button" id="btn-install-barista-pwa" class="nav-tab-btn" onclick="installBaristaPwa()" style="border-color:rgba(212,175,55,0.45); color:var(--gold-light);">
+                    📲 Instalar App
+                </button>
             </div>
 
             <div class="spotlight-wrap">
@@ -3128,6 +3164,43 @@ BARISTA_HTML = """
             }
             requestAnimationFrame(scanTick);
         }
+
+        // --- PWA Instalación en Teléfono / Tablet / iPad ---
+        let deferredBaristaPrompt = null;
+        const installBtn = document.getElementById('btn-install-barista-pwa');
+
+        function checkStandaloneMode() {
+            const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+            if (isStandalone && installBtn) {
+                installBtn.style.display = 'none';
+            }
+        }
+        checkStandaloneMode();
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredBaristaPrompt = e;
+            if (installBtn) installBtn.style.display = 'inline-flex';
+        });
+
+        window.addEventListener('appinstalled', () => {
+            deferredBaristaPrompt = null;
+            if (installBtn) installBtn.style.display = 'none';
+        });
+
+        async function installBaristaPwa() {
+            if (deferredBaristaPrompt) {
+                deferredBaristaPrompt.prompt();
+                try { await deferredBaristaPrompt.userChoice; } catch (e) {}
+                deferredBaristaPrompt = null;
+            } else {
+                document.getElementById('maishas-pwa-modal').classList.add('open');
+            }
+        }
     </script>
 </body>
 </html>
@@ -3765,6 +3838,37 @@ def card_icon_192():
     return send_file(buf, mimetype="image/png", max_age=86400)
 
 
+@app.route("/barista/icon-512.png")
+def barista_icon_512():
+    icon_path = os.path.join(PASS_TEMPLATE_DIR, "icon@2x.png")
+    img = Image.open(icon_path).resize((512, 512), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png", max_age=86400)
+
+
+@app.route("/barista/manifest.webmanifest")
+def barista_manifest():
+    manifest_data = {
+        "id": "/barista",
+        "name": "Maishas Café — Consola Barista POS",
+        "short_name": "Barista POS",
+        "description": "Consola de punto de venta, escáner QR y sellos de Maishas Café",
+        "start_url": "/barista",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#0D0C0B",
+        "theme_color": "#0D0C0B",
+        "icons": [
+            {"src": "/card/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/barista/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ]
+    }
+    return Response(json.dumps(manifest_data), mimetype="application/manifest+json")
+
+
 @app.route("/card/<serial_number>/manifest.webmanifest")
 def android_manifest(serial_number):
     serial_clean = (serial_number or "").strip().upper()
@@ -3776,7 +3880,8 @@ def android_manifest(serial_number):
         "background_color": "#0D0C0B",
         "theme_color": "#12100E",
         "icons": [
-            {"src": "/card/icon-192.png", "sizes": "192x192", "type": "image/png"}
+            {"src": "/card/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/barista/icon-512.png", "sizes": "512x512", "type": "image/png"}
         ]
     }
     return Response(json.dumps(manifest_data), mimetype="application/manifest+json")
@@ -3787,6 +3892,7 @@ def service_worker_js():
     sw_code = """
 self.addEventListener('install', event => { self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', event => {});
 
 self.addEventListener('push', event => {
     let data = {
