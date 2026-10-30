@@ -1497,13 +1497,13 @@ ANDROID_CARD_HTML = """
         <div id="wallet-download-hint" class="wallet-step-hint">
             ✅ <strong>Pase {{ client.serial }} descargado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para guardarlo en tu <strong>Billetera</strong>, y toca <strong>«Permitir»</strong> si tu celular te pregunta por las notificaciones.
         </div>
-        {% endif %}
 
         <div class="wallet-sub-links">
             <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush(false)" style="border-color:rgba(212,175,55,0.45); color:#E6C280; width:100%;">
                 🔔 Activar Notificaciones Push en este Android
             </button>
         </div>
+        {% endif %}
     </div>
 
     <!-- TARJETA DIGITAL INTERACTIVA -->
@@ -1596,9 +1596,11 @@ ANDROID_CARD_HTML = """
             <span>📲 Instalar Tarjeta Automática en Pantalla de Inicio</span>
         </button>
 
+        {% if not gw_enabled %}
         <button type="button" id="btn-enable-push" class="btn-action-glass" style="border-color:rgba(212,175,55,0.35); color:#E6C280;" onclick="enableAndroidPush(false)">
             <span>🔔 Activar Notificaciones Push en mi Celular</span>
         </button>
+        {% endif %}
     </div>
 
     <script>
@@ -1795,10 +1797,12 @@ ANDROID_CARD_HTML = """
             }
         }
 
+        {% if not gw_enabled %}
         // Si ya dio permiso antes, registrar y sincronizar Service Worker automáticamente al abrir
         if ('serviceWorker' in navigator && 'Notification' in window && Notification.permission === 'granted') {
             enableAndroidPush(true);
         }
+        {% endif %}
 
         // Si viene desde el registro o notificación Push, abrir Google Wallet o actualizar automáticamente
         (function checkUrlParams() {
@@ -4971,28 +4975,30 @@ def send_apns_push_for_serial(serial, notification_body="Tu tarjeta Maishas Caf�
             if status_code == 410 or "Unregistered" in detail or "BadDeviceToken" in detail:
                 c.execute("DELETE FROM registrations WHERE push_token = ? AND UPPER(serial) = ?", (token, serial_clean))
 
-    # 2. Enviar a suscripciones Web Push de Android (Chrome / PWA)
-    conn.commit()  # liberar el lock de SQLite antes de que send_android_webpush escriba logs
+    # 2. Enviar a suscripciones Web Push de Android (Chrome / PWA) sólo si Google Wallet nativo NO está activo,
+    #    para que las notificaciones en Android salgan con el ícono nativo de Google Wallet y no con el de Chrome.
+    conn.commit()  # liberar el lock de SQLite
     android_ok = 0
     android_fail = 0
     stale_endpoints = []
-    for endpoint, sub_json_str in android_subs:
-        try:
-            sub_dict = json.loads(sub_json_str)
-            ok_and, code_and, _ = send_android_webpush(sub_dict, serial_clean, notification_body, stamps=current_stamps)
-            if ok_and:
-                any_success = True
-                android_ok += 1
-            else:
+    if not google_wallet_enabled():
+        for endpoint, sub_json_str in android_subs:
+            try:
+                sub_dict = json.loads(sub_json_str)
+                ok_and, code_and, _ = send_android_webpush(sub_dict, serial_clean, notification_body, stamps=current_stamps)
+                if ok_and:
+                    any_success = True
+                    android_ok += 1
+                else:
+                    any_error = True
+                    android_fail += 1
+                    if code_and in (404, 410):
+                        stale_endpoints.append(endpoint)
+            except Exception:
                 any_error = True
                 android_fail += 1
-                if code_and in (404, 410):
-                    stale_endpoints.append(endpoint)
-        except Exception:
-            any_error = True
-            android_fail += 1
-    for endpoint in stale_endpoints:
-        c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
+        for endpoint in stale_endpoints:
+            c.execute("DELETE FROM android_subscriptions WHERE endpoint = ?", (endpoint,))
 
     # 3. Google Wallet (Android): activar actualización y aviso nativo en segundo plano. No afecta a Apple.
     gw_should_push = google_wallet_enabled() and (android_active or android_subs or not token_map)
@@ -5212,6 +5218,7 @@ def build_google_loyalty_object(serial, base_url):
     tier = get_vip_tier(visits if visits is not None else stamps)
     reward = "¡CAFÉ GRATIS DISPONIBLE! 🎉" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu café gratis"
     clean_msg = (message or DEFAULT_MESSAGE).replace("\u200b", "")
+    promo_balance = (message or DEFAULT_MESSAGE)[:90]
     loc = get_shop_location()
     version = urllib_quote(str(updated_at or ""))
     return {
@@ -5221,6 +5228,7 @@ def build_google_loyalty_object(serial, base_url):
         "accountId": serial_id,
         "accountName": name or "Cliente",
         "loyaltyPoints": {"label": "SELLOS", "balance": {"string": f"{stamps} / 10"}},
+        "secondaryLoyaltyPoints": {"label": "AVISO MAISHAS", "balance": {"string": promo_balance}},
         "barcode": {"type": "QR_CODE", "value": serial_id, "alternateText": serial_id},
         "heroImage": {
             "sourceUri": {"uri": f"{base_url}/card/{serial_id}/strip.png?v={version}"},
