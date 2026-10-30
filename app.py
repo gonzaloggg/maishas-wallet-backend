@@ -16,6 +16,40 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 
 BARISTA_COOKIE_NAME = "maishas_barista_auth"
+_login_attempts = {}  # ip -> [timestamps]
+LOGIN_RATE_LIMIT_MAX = 8
+LOGIN_RATE_LIMIT_WINDOW = 60  # segundos
+
+
+def _client_ip():
+    xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return xff or request.remote_addr or "unknown"
+
+
+def _is_login_rate_limited(ip):
+    now = datetime.now(timezone.utc).timestamp()
+    recent = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_RATE_LIMIT_WINDOW]
+    _login_attempts[ip] = recent
+    return len(recent) >= LOGIN_RATE_LIMIT_MAX
+
+
+def _record_login_failure(ip):
+    now = datetime.now(timezone.utc).timestamp()
+    recent = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_RATE_LIMIT_WINDOW]
+    recent.append(now)
+    _login_attempts[ip] = recent
+
+
+def _clear_login_failures(ip):
+    _login_attempts.pop(ip, None)
+
+
+def _normalize_phone_digits(phone_str):
+    """Extrae los últimos 10 dígitos del número de celular para evitar duplicados (ej. +52 642 123 4567 -> 6421234567)."""
+    digits = "".join(ch for ch in (phone_str or "") if ch.isdigit())
+    if len(digits) >= 10:
+        return digits[-10:]
+    return digits
 
 
 def _barista_expected_token():
@@ -182,8 +216,8 @@ BARISTA_LOGIN_HTML = """
 """
 
 
-def authenticate(error=None):
-    return Response(render_template_string(BARISTA_LOGIN_HTML, error=error), status=200, mimetype="text/html")
+def authenticate(error=None, status_code=200):
+    return Response(render_template_string(BARISTA_LOGIN_HTML, error=error), status=status_code, mimetype="text/html")
 
 
 def requires_auth(f):
@@ -428,11 +462,38 @@ def calculate_birthday_info(birthdate_str, ref_date=None):
     }
 
 
-def _clean_text_for_pil(text):
-    """Limpia emojis y signos invertidos fuera de la fuente básica de Pillow para renderizado nítido."""
+def _load_strip_font(size=26):
+    """Carga fuente TrueType con soporte completo de acentos si está disponible en el sistema; si no, usa la fuente base de Pillow."""
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, size=size), True
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size), False
+    except TypeError:
+        return ImageFont.load_default(), False
+
+
+def _clean_text_for_pil(text, has_utf8_font=False):
+    """Limpia emojis fuera de rango y adapta acentos según soporte de la fuente para renderizado nítido sin cuadros vacíos."""
     if not text:
         return ""
-    cleaned = "".join(ch for ch in text if 32 <= ord(ch) <= 255 and ch not in ("¡", "¿"))
+    if has_utf8_font:
+        cleaned = "".join(ch for ch in text if 32 <= ord(ch) <= 255)
+    else:
+        import unicodedata
+        norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+        cleaned = "".join(ch for ch in norm if 32 <= ord(ch) <= 126)
     return " ".join(cleaned.split()).strip()
 
 
@@ -548,10 +609,14 @@ def _create_dynamic_strip_pil(stamps_count, message=None):
                 )
 
     # Barra inferior de alta legibilidad dentro del strip para que el AVISO siempre se lea completo
-    raw_msg = _clean_text_for_pil((message or DEFAULT_MESSAGE).replace("\u200b", ""))
+    font_banner, has_utf8 = _load_strip_font(size=26)
+    raw_msg = _clean_text_for_pil((message or DEFAULT_MESSAGE).replace("\u200b", ""), has_utf8_font=has_utf8)
     if not raw_msg:
-        raw_msg = "Bienvenido a Maishas Cafe"
-    reward_txt = "CAFE GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Cafe Gratis"
+        raw_msg = "Bienvenido a Maishas Café" if has_utf8 else "Bienvenido a Maishas Cafe"
+    if has_utf8:
+        reward_txt = "¡CAFÉ GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Café Gratis"
+    else:
+        reward_txt = "CAFE GRATIS DISPONIBLE!" if stamps >= 10 else f"Faltan {10 - stamps} sellos para tu Cafe Gratis"
     banner_text = f"{reward_txt}  |  AVISO: {raw_msg}"
     if len(banner_text) > 88:
         banner_text = banner_text[:85] + "..."
@@ -563,10 +628,6 @@ def _create_dynamic_strip_pil(stamps_count, message=None):
         outline=(128, 104, 62),
         width=2
     )
-    try:
-        font_banner = ImageFont.load_default(size=26)
-    except TypeError:
-        font_banner = ImageFont.load_default()
 
     bbox = draw.textbbox((0, 0), banner_text, font=font_banner)
     tw = bbox[2] - bbox[0]
@@ -671,6 +732,22 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT,
             log_text TEXT
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS stamp_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            serial TEXT,
+            client_name TEXT,
+            action TEXT,
+            stamps_before INTEGER,
+            stamps_after INTEGER,
+            visits_after INTEGER,
+            redeemed_after INTEGER,
+            created_at_utc TEXT,
+            created_at_sonora TEXT,
+            detail TEXT
         )
     ''')
 
@@ -2724,6 +2801,40 @@ BARISTA_HTML = """
         </div>
     </div>
 
+    <!-- MODAL DE EDICIÓN DE CLIENTE -->
+    <div class="custom-modal-backdrop" id="maishas-edit-modal">
+        <div class="custom-modal-box" style="max-width:440px; text-align:left;">
+            <div style="text-align:center;">
+                <div class="cm-icon warn" style="font-size:22px;">✏️</div>
+                <div class="cm-brand">Maishas Café · Ficha del Socio</div>
+                <h3 class="cm-title">Editar Datos del Cliente</h3>
+            </div>
+            <form action="/api/update-client" method="POST" style="margin-top:12px;">
+                <input type="hidden" name="serial" id="edit-client-serial">
+                <div style="margin-bottom:10px;">
+                    <label style="font-size:11px; color:var(--gold-light); font-weight:700; display:block; margin-bottom:4px;">Nombre completo</label>
+                    <input type="text" name="name" id="edit-client-name" class="input-dark" required maxlength="80">
+                </div>
+                <div style="margin-bottom:10px;">
+                    <label style="font-size:11px; color:var(--gold-light); font-weight:700; display:block; margin-bottom:4px;">Celular (WhatsApp)</label>
+                    <input type="tel" name="phone" id="edit-client-phone" class="input-dark" maxlength="25">
+                </div>
+                <div style="margin-bottom:10px;">
+                    <label style="font-size:11px; color:var(--gold-light); font-weight:700; display:block; margin-bottom:4px;">Correo electrónico</label>
+                    <input type="email" name="email" id="edit-client-email" class="input-dark" maxlength="100">
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="font-size:11px; color:var(--gold-light); font-weight:700; display:block; margin-bottom:4px;">Fecha de nacimiento</label>
+                    <input type="date" name="birthdate" id="edit-client-birthdate" class="input-dark" style="color-scheme:dark;">
+                </div>
+                <div class="cm-actions">
+                    <button type="button" class="cm-btn-cancel" onclick="closeEditClientModal()">Cancelar</button>
+                    <button type="submit" class="cm-btn-confirm warn">💾 Guardar Cambios</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <header class="sticky-header">
         <div class="header-inner">
             <div class="brand-Cluster">
@@ -2882,6 +2993,9 @@ BARISTA_HTML = """
                         {% if client.last_push_clean %}
                         <span class="tele-line">{{ client.last_push_clean }}</span>
                         {% endif %}
+                        {% if client.android_installed and client.gw_pushes_24h is defined and client.gw_pushes_24h >= 3 %}
+                        <span class="tele-line" style="color:#FFB340;" title="Google Wallet muestra máximo 3 alertas emergentes cada 24h; los sellos siguen actualizándose en silencio.">🔕 Cuota Google 3/3 hoy (actualiza en silencio)</span>
+                        {% endif %}
                         {% if client.last_sync_clean %}
                         <span class="tele-line" style="color:#7CE8B5;">🔄 Hora local Sonora: {{ client.last_sync_clean }}</span>
                         {% endif %}
@@ -2930,6 +3044,13 @@ BARISTA_HTML = """
 
                         <a href="/card/{{ client.serial }}" target="_blank" class="btn-icon-sec" title="Abrir Tarjeta Digital de {{ client.name }}">📲</a>
                         <button type="button" class="btn-icon-sec" title="Enviar mensaje directo a {{ client.name }}" data-name="{{ client.name|e }}" onclick="selectClientForPush('{{ client.serial }}', this.dataset.name)">💬</button>
+                        <button type="button" class="btn-icon-sec" title="Editar datos de {{ client.name }}"
+                                data-serial="{{ client.serial }}"
+                                data-name="{{ client.name|e }}"
+                                data-phone="{{ client.phone|e }}"
+                                data-email="{{ client.email|e }}"
+                                data-birthdate="{{ client.birthdate|e }}"
+                                onclick="openEditClientModal(this)">✏️</button>
 
                         <form id="form-del-{{ client.serial }}" action="/api/delete-client" method="POST" style="margin:0;">
                             <input type="hidden" name="serial" value="{{ client.serial }}">
@@ -3197,6 +3318,7 @@ BARISTA_HTML = """
                             <th>Cafés Canjeados</th>
                             <th>Nivel VIP</th>
                             <th>Última Actividad</th>
+                            <th>Editar</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -3237,11 +3359,75 @@ BARISTA_HTML = """
                             <td style="font-size:12px; color:var(--text-secondary);">
                                 {{ client.last_sync_clean if client.last_sync_clean else (client.last_push_clean if client.last_push_clean else '—') }}
                             </td>
+                            <td>
+                                <button type="button" class="btn-icon-sec" title="Editar datos de {{ client.name }}"
+                                        data-serial="{{ client.serial }}"
+                                        data-name="{{ client.name|e }}"
+                                        data-phone="{{ client.phone|e }}"
+                                        data-email="{{ client.email|e }}"
+                                        data-birthdate="{{ client.birthdate|e }}"
+                                        onclick="openEditClientModal(this)">✏️</button>
+                            </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="12" style="text-align:center; padding:32px; color:var(--text-secondary);">
+                            <td colspan="13" style="text-align:center; padding:32px; color:var(--text-secondary);">
                                 No hay clientes registrados todavía.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- BITÁCORA DE AUDITORÍA DE MOVIMIENTOS (SELLOS Y CANJES) -->
+            <div class="db-header-card" style="margin-top:22px;">
+                <div>
+                    <h2 style="margin:0; font-size:18px; font-weight:800; color:var(--text-primary);">
+                        📜 Bitácora Reciente de Sellos y Canjes (Auditoría de Turno)
+                    </h2>
+                    <p style="margin:4px 0 0; font-size:12.5px; color:var(--text-secondary);">
+                        Historial cronológico de los últimos movimientos de sellos (+1, -1 y canjes de café gratis) con hora local de Sonora.
+                    </p>
+                </div>
+            </div>
+
+            <div class="db-table-wrap">
+                <table class="db-table">
+                    <thead>
+                        <tr>
+                            <th>Fecha / Hora (Sonora)</th>
+                            <th>Movimiento</th>
+                            <th>Cliente</th>
+                            <th>Código Serial</th>
+                            <th>Cambio de Sellos</th>
+                            <th>Visitas Acumuladas</th>
+                            <th>Canjes Totales</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for tx in recent_transactions or [] %}
+                        <tr>
+                            <td style="font-size:12px; color:var(--text-secondary);">{{ tx.created_at_sonora }}</td>
+                            <td>
+                                {% if tx.action == 'reset' %}
+                                    <span class="status-pill-on" style="background:rgba(212,175,55,0.16); color:var(--gold-light); border:1px solid rgba(212,175,55,0.4);">🎁 Canje Café Gratis</span>
+                                {% elif tx.action == 'sub' %}
+                                    <span class="status-pill-off" style="color:#FFB340;">➖ Ajuste (-1 sello)</span>
+                                {% else %}
+                                    <span class="status-pill-on">☕️ +1 Sello</span>
+                                {% endif %}
+                            </td>
+                            <td><strong>{{ tx.client_name }}</strong></td>
+                            <td><span class="serial-tag">{{ tx.serial }}</span></td>
+                            <td><strong style="color:var(--gold-light);">{{ tx.stamps_before }} → {{ tx.stamps_after }} / 10</strong></td>
+                            <td>{{ tx.visits_after }}</td>
+                            <td>{{ tx.redeemed_after }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="7" style="text-align:center; padding:24px; color:var(--text-secondary);">
+                                Aún no se han registrado movimientos en la bitácora.
                             </td>
                         </tr>
                         {% endfor %}
@@ -3274,7 +3460,23 @@ BARISTA_HTML = """
                 .replace(/'/g, '&#39;');
         }
 
-        // Protección anti doble clic en formularios de sellos y acciones
+        let currentMainView = 'pos';
+        let activeTab = 'all';
+
+        function saveBaristaUiState() {
+            try {
+                const searchEl = document.getElementById('client-search');
+                sessionStorage.setItem('maishas_barista_ui_state', JSON.stringify({
+                    view: currentMainView || 'pos',
+                    filterTab: activeTab || 'all',
+                    searchQuery: searchEl ? searchEl.value : '',
+                    scrollY: window.scrollY || 0,
+                    ts: Date.now()
+                }));
+            } catch (err) {}
+        }
+
+        // Protección anti doble clic en formularios de sellos y acciones + persistencia de estado UI
         document.addEventListener('submit', function(e) {
             const form = e.target;
             if (!form || form.tagName !== 'FORM') return;
@@ -3282,6 +3484,7 @@ BARISTA_HTML = """
                 e.preventDefault();
                 return false;
             }
+            saveBaristaUiState();
             form.dataset.submitting = '1';
             const btn = form.querySelector('button[type="submit"]');
             if (btn) {
@@ -3293,6 +3496,7 @@ BARISTA_HTML = """
 
         // Cambio entre las 4 pestañas principales: Mostrador POS, Cumpleañeros, Alertas Push y Base de Datos
         function switchMainView(view) {
+            currentMainView = view || 'pos';
             const views = {
                 pos: document.getElementById('view-pos-container'),
                 bday: document.getElementById('view-bday-container'),
@@ -3312,6 +3516,22 @@ BARISTA_HTML = """
             if (view !== 'pos' && typeof scanning !== 'undefined' && scanning) {
                 stopScanner();
             }
+        }
+
+        // Modal de Edición de Cliente
+        function openEditClientModal(btnEl) {
+            if (!btnEl) return;
+            document.getElementById('edit-client-serial').value = btnEl.dataset.serial || '';
+            document.getElementById('edit-client-name').value = btnEl.dataset.name || '';
+            document.getElementById('edit-client-phone').value = btnEl.dataset.phone || '';
+            document.getElementById('edit-client-email').value = btnEl.dataset.email || '';
+            document.getElementById('edit-client-birthdate').value = btnEl.dataset.birthdate || '';
+            document.getElementById('maishas-edit-modal').classList.add('open');
+        }
+
+        function closeEditClientModal() {
+            const modal = document.getElementById('maishas-edit-modal');
+            if (modal) modal.classList.remove('open');
         }
 
         // Modal de Confirmación Personalizado (Sin URL de navegador)
@@ -3361,7 +3581,10 @@ BARISTA_HTML = """
         function executeConfirmedForm() {
             if (pendingFormId) {
                 const form = document.getElementById(pendingFormId);
-                if (form) form.submit();
+                if (form) {
+                    saveBaristaUiState();
+                    form.submit();
+                }
             }
             closeConfirmModal();
         }
@@ -3369,6 +3592,7 @@ BARISTA_HTML = """
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeConfirmModal();
+                closeEditClientModal();
             }
             if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
@@ -3427,7 +3651,6 @@ BARISTA_HTML = """
             }
         }
 
-        let activeTab = 'all';
         function setFilterTab(tab) {
             activeTab = tab;
             document.querySelectorAll('.filter-pill').forEach(btn => {
@@ -3456,6 +3679,32 @@ BARISTA_HTML = """
                 row.style.display = (!q || searchTxt.includes(q)) ? '' : 'none';
             });
         }
+
+        // Restaurar pestaña activa, filtro, búsqueda y posición de scroll tras enviar un formulario
+        (function restoreBaristaUiState() {
+            try {
+                const raw = sessionStorage.getItem('maishas_barista_ui_state');
+                if (!raw) return;
+                sessionStorage.removeItem('maishas_barista_ui_state');
+                const state = JSON.parse(raw);
+                if (!state || (Date.now() - (state.ts || 0) > 30000)) return;
+                if (state.view && ['pos', 'bday', 'push', 'db'].includes(state.view)) {
+                    switchMainView(state.view);
+                }
+                const searchEl = document.getElementById('client-search');
+                if (searchEl && state.searchQuery) {
+                    searchEl.value = state.searchQuery;
+                }
+                if (state.filterTab) {
+                    setFilterTab(state.filterTab);
+                } else if (state.searchQuery) {
+                    filterClients();
+                }
+                if (typeof state.scrollY === 'number' && state.scrollY > 0) {
+                    setTimeout(() => window.scrollTo({ top: state.scrollY, behavior: 'instant' }), 20);
+                }
+            } catch (err) {}
+        })();
 
         function detectMyGPS() {
             if (!navigator.geolocation) {
@@ -3903,9 +4152,16 @@ def barista_login():
         if is_barista_authenticated():
             return redirect("/barista")
         return authenticate()
+    ip = _client_ip()
+    if _is_login_rate_limited(ip):
+        return authenticate(
+            error="⏳ Demasiados intentos fallidos. Por seguridad espera 1 minuto antes de volver a intentar.",
+            status_code=429
+        )
     username = request.form.get("username", "")
     password = request.form.get("password", "")
     if check_auth(username, password):
+        _clear_login_failures(ip)
         resp = redirect("/barista")
         resp.set_cookie(
             BARISTA_COOKIE_NAME,
@@ -3915,6 +4171,7 @@ def barista_login():
             samesite="Lax"
         )
         return resp
+    _record_login_failure(ip)
     return authenticate(error="Usuario o contraseña incorrectos.")
 
 
@@ -3941,6 +4198,47 @@ def barista():
         ORDER BY c.rowid DESC
     """)
     rows = c.fetchall()
+
+    # Contar notificaciones emergentes de Google Wallet en las últimas 24 horas por cliente
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    gw_push_counts = {}
+    try:
+        gw_rows = c.execute(
+            "SELECT log_text FROM wallet_logs WHERE created_at >= ? AND log_text LIKE '🟢 Google Wallet: pase y notificación enviados a %'",
+            (cutoff_24h,)
+        ).fetchall()
+        for (ltxt,) in gw_rows:
+            m_ser = re.search(r"MAISHAS-[A-Z0-9]{6}", ltxt or "")
+            if m_ser:
+                s_key = m_ser.group(0)
+                gw_push_counts[s_key] = gw_push_counts.get(s_key, 0) + 1
+    except Exception:
+        pass
+
+    # Cargar últimos 50 movimientos de la bitácora de auditoría
+    recent_transactions = []
+    try:
+        tx_rows = c.execute("""
+            SELECT serial, client_name, action, stamps_before, stamps_after, visits_after, redeemed_after, created_at_sonora, detail
+            FROM stamp_transactions
+            ORDER BY id DESC
+            LIMIT 50
+        """).fetchall()
+        for tx in tx_rows:
+            recent_transactions.append({
+                "serial": tx[0],
+                "client_name": tx[1],
+                "action": tx[2],
+                "stamps_before": tx[3] or 0,
+                "stamps_after": tx[4] or 0,
+                "visits_after": tx[5] or 0,
+                "redeemed_after": tx[6] or 0,
+                "created_at_sonora": tx[7] or "",
+                "detail": tx[8] or "",
+            })
+    except Exception:
+        pass
+
     conn.close()
 
     clients = []
@@ -4013,6 +4311,7 @@ def barista():
             "total_visits": visits_val,
             "redeemed_count": redeemed_val,
             "tier": tier,
+            "gw_pushes_24h": gw_push_counts.get(r[0], 0),
         }
         clients.append(client_obj)
         if bday_info["is_upcoming_week"]:
@@ -4031,6 +4330,7 @@ def barista():
         silver_count=silver_count,
         total_redeemed=total_redeemed,
         shop_loc=get_shop_location(),
+        recent_transactions=recent_transactions,
         ok=request.args.get("ok"),
         updated_serial=request.args.get("updated")
     )
@@ -4153,16 +4453,25 @@ def register():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # Evitar duplicados: si el cliente ya se registró con el mismo correo electrónico, reutilizar su mismo ID MAISHAS-XXXXXX
+    # Evitar duplicados: reutilizar ID MAISHAS-XXXXXX si coincide correo, celular (10 dígitos) o nombre
     existing = None
+    norm_phone = _normalize_phone_digits(phone)
     if email:
         existing = c.execute(
-            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate FROM clients WHERE LOWER(TRIM(email)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
+            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate, email FROM clients WHERE LOWER(TRIM(email)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
             (email,)
         ).fetchone()
-    elif name:
+    if not existing and len(norm_phone) == 10:
+        all_with_phone = c.execute(
+            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate, email FROM clients WHERE phone IS NOT NULL AND TRIM(phone) != '' ORDER BY rowid DESC"
+        ).fetchall()
+        for row_p in all_with_phone:
+            if _normalize_phone_digits(row_p[5]) == norm_phone:
+                existing = row_p
+                break
+    if not existing and name and not email and len(norm_phone) < 10:
         existing = c.execute(
-            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate FROM clients WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
+            "SELECT serial, stamps, total_visits, redeemed_count, message, phone, birthdate, email FROM clients WHERE LOWER(TRIM(name)) = LOWER(?) ORDER BY rowid DESC LIMIT 1",
             (name,)
         ).fetchone()
 
@@ -4174,12 +4483,13 @@ def register():
         msg_val = existing[4] or DEFAULT_MESSAGE
         final_phone = phone if phone else (existing[5] or "")
         final_bdate = birthdate if birthdate else (existing[6] or "")
+        final_email = email if email else (existing[7] or "")
         c.execute(
             """UPDATE clients
                SET name = ?, email = ?, phone = ?, birthdate = ?, updated_at = ?,
                    platform = ?, android_active = CASE WHEN ? = 1 THEN 1 ELSE android_active END
                WHERE serial = ?""",
-            (name or "Cliente", email, final_phone, final_bdate, now_ts, platform, android_active, serial_number)
+            (name or "Cliente", final_email, final_phone, final_bdate, now_ts, platform, android_active, serial_number)
         )
     else:
         serial_number = f"MAISHAS-{uuid.uuid4().hex[:6].upper()}"
@@ -4620,6 +4930,14 @@ def _perform_stamp_update(serial, action="add"):
         "UPDATE clients SET stamps = ?, total_visits = ?, redeemed_count = ?, updated_at = ?, last_action = ? WHERE serial = ?",
         (new_stamps, new_visits, new_redeemed, now_ts, action, serial_id)
     )
+    try:
+        c.execute(
+            """INSERT INTO stamp_transactions (serial, client_name, action, stamps_before, stamps_after, visits_after, redeemed_after, created_at_utc, created_at_sonora, detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (serial_id, client_name, action, current_stamps, new_stamps, new_visits, new_redeemed, now_ts, get_sonora_datetime_str(), action_label)
+        )
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -4680,6 +4998,66 @@ def update_location():
     ))
 
 
+@app.route("/api/update-client", methods=["POST"])
+@requires_auth
+def update_client():
+    serial = (request.form.get("serial") or "").strip().upper()
+    name = (request.form.get("name") or "").strip()[:80]
+    phone = (request.form.get("phone") or "").strip()[:25]
+    email = (request.form.get("email") or "").strip()[:100]
+    birthdate = (request.form.get("birthdate") or "").strip()[:20]
+
+    if not serial or not name:
+        return redirect(url_for("barista", ok="⚠️ El nombre del cliente es obligatorio"))
+
+    now_ts = get_utc_timestamp()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    row = c.execute("SELECT serial FROM clients WHERE UPPER(serial) = ?", (serial,)).fetchone()
+    if not row:
+        conn.close()
+        return redirect(url_for("barista", ok=f"⚠️ Cliente {serial} no encontrado"))
+
+    serial_id = row[0]
+    c.execute(
+        "UPDATE clients SET name = ?, phone = ?, email = ?, birthdate = ?, updated_at = ? WHERE serial = ?",
+        (name, phone, email, birthdate, now_ts, serial_id)
+    )
+    conn.commit()
+    conn.close()
+
+    send_apns_push_for_serial(serial_id, notification_body="✨ Tus datos de socio fueron actualizados en Maishas Café")
+    return redirect(url_for("barista", ok=f"✏️ Datos de {name} ({serial_id}) actualizados correctamente", updated=serial_id))
+
+
+@app.route("/api/transactions")
+@requires_auth
+def api_transactions():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT id, serial, client_name, action, stamps_before, stamps_after, visits_after, redeemed_after, created_at_sonora, detail
+        FROM stamp_transactions
+        ORDER BY id DESC
+        LIMIT 100
+    """).fetchall()
+    conn.close()
+    return jsonify([
+        {
+            "id": r[0],
+            "serial": r[1],
+            "client_name": r[2],
+            "action": r[3],
+            "stamps_before": r[4],
+            "stamps_after": r[5],
+            "visits_after": r[6],
+            "redeemed_after": r[7],
+            "created_at_sonora": r[8],
+            "detail": r[9],
+        }
+        for r in rows
+    ])
+
+
 @app.route("/api/delete-client", methods=["POST"])
 @requires_auth
 def delete_client():
@@ -4690,6 +5068,7 @@ def delete_client():
     row = c.fetchone()
     c.execute("DELETE FROM registrations WHERE serial = ?", (serial,))
     c.execute("DELETE FROM android_subscriptions WHERE serial = ?", (serial,))
+    c.execute("DELETE FROM stamp_transactions WHERE serial = ?", (serial,))
     c.execute("DELETE FROM clients WHERE serial = ?", (serial,))
     conn.commit()
     conn.close()
