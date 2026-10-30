@@ -936,6 +936,7 @@ REGISTRATION_HTML = """
             const ua = navigator.userAgent || navigator.vendor || window.opera || '';
             const platInput = document.getElementById('platform-input');
             const submitBtn = document.getElementById('submit-wallet-btn');
+            const formEl = document.querySelector('.form-card form');
             if (/android/i.test(ua)) {
                 platInput.value = 'android';
                 if (submitBtn) {
@@ -951,6 +952,20 @@ REGISTRATION_HTML = """
                 }
             } else if (/iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
                 platInput.value = 'ios';
+            }
+            if (formEl && submitBtn) {
+                formEl.addEventListener('submit', function(e) {
+                    if (formEl.dataset.submitting === '1') {
+                        e.preventDefault();
+                        return false;
+                    }
+                    formEl.dataset.submitting = '1';
+                    submitBtn.style.opacity = '0.8';
+                    submitBtn.innerHTML = '<span>⏳ Abriendo tu tarjeta...</span>';
+                    setTimeout(function() {
+                        formEl.dataset.submitting = '0';
+                    }, 8000);
+                });
             }
         })();
     </script>
@@ -1668,10 +1683,10 @@ ANDROID_CARD_HTML = """
                     const saveBtn = document.getElementById('btn-save-wallet-top');
                     if (saveBtn) {
                         saveBtn.href = `/card/${SERIAL}/download.pkpass?v=${encodeURIComponent(data.updated_at)}`;
-                    }
-                    const saveLbl = document.getElementById('btn-save-wallet-label');
-                    if (saveLbl) {
-                        saveLbl.textContent = `🔄 Actualizar mi pase en Billetera (${data.stamps}/10 sellos)`;
+                        const saveLbl = document.getElementById('btn-save-wallet-label');
+                        if (saveLbl) {
+                            saveLbl.textContent = `🔄 Actualizar mi pase en Billetera (${data.stamps}/10 sellos)`;
+                        }
                     }
 
                     // Mostrar alerta estilo pantalla bloqueada según el cambio
@@ -1785,10 +1800,18 @@ ANDROID_CARD_HTML = """
             enableAndroidPush(true);
         }
 
-        // Si viene desde el botón de actualizar de una notificación Push, descargar el .pkpass actualizado
+        // Si viene desde el registro o notificación Push, abrir Google Wallet o actualizar automáticamente
         (function checkUrlParams() {
             const params = new URLSearchParams(window.location.search);
-            if (params.get('auto_pkpass') === '1') {
+            if (params.get('autowallet') === '1') {
+                try {
+                    window.history.replaceState({}, '', window.location.pathname);
+                } catch (e) {}
+                const gwBtn = document.getElementById('btn-google-wallet');
+                if (gwBtn && gwBtn.href) {
+                    setTimeout(() => { window.location.href = gwBtn.href; }, 180);
+                }
+            } else if (params.get('auto_pkpass') === '1') {
                 setTimeout(() => { triggerPkpassDownload(); }, 400);
             } else if (params.get('from_push') === '1') {
                 showLiveBanner(`✨ ¡Tu tarjeta está actualizada! Tienes ${currentStamps} / 10 sellos.`);
@@ -4137,9 +4160,9 @@ def register():
     conn.commit()
     conn.close()
 
-    # Si es Android, redirigir a su Tarjeta Digital con el mismo ID unificado
+    # Si es Android, redirigir a su Tarjeta Digital y abrir automáticamente Google Wallet
     if platform == "android":
-        return redirect(url_for("android_card_view", serial_number=serial_number))
+        return redirect(url_for("android_card_view", serial_number=serial_number, autowallet=1))
 
     host_url = request.host_url
     pkpass_path = generate_signed_pkpass(
@@ -5096,13 +5119,16 @@ def _gw_sign_jwt(claims, sa):
 
 
 def _gw_http(method, url, headers=None, json_body=None, data=None):
-    with httpx.Client(timeout=15.0) as client:
-        res = client.request(method, url, headers=headers, json=json_body, data=data)
     try:
-        body = res.json()
-    except Exception:
-        body = {"raw": res.text[:300]}
-    return res.status_code, body
+        with httpx.Client(timeout=10.0) as client:
+            res = client.request(method, url, headers=headers, json=json_body, data=data)
+        try:
+            body = res.json()
+        except Exception:
+            body = {"raw": res.text[:300]}
+        return res.status_code, body
+    except Exception as e:
+        return 0, {"error": str(e)[:200]}
 
 
 def _gw_access_token():
@@ -5170,7 +5196,7 @@ def build_google_loyalty_class(base_url):
 def build_google_loyalty_object(serial, base_url):
     """Construye el pase de lealtad de Google con los datos actuales del cliente (sellos, nivel, aviso, strip)."""
     serial_clean = (serial or "").strip().upper()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
     row = conn.execute(
         "SELECT serial, name, stamps, message, total_visits, updated_at FROM clients WHERE UPPER(serial) = ?",
         (serial_clean,)
@@ -5252,23 +5278,20 @@ def ensure_google_object(serial, base_url):
 
 
 def google_wallet_save_url(serial, base_url):
-    """Link 'Agregar a Google Wallet' firmado (JWT corto: solo referencia el id del pase ya creado)."""
-    ok, status, resp = ensure_google_object(serial, base_url)
+    """Link 'Agregar a Google Wallet' firmado en 0ms sin bloquear la petición HTTP."""
     sa = _load_google_sa()
     if not sa:
         return None, "Cuenta de servicio no disponible"
+    obj = build_google_loyalty_object(serial, base_url)
+    if not obj:
+        return None, "Cliente no encontrado"
+    import threading
+    threading.Thread(target=ensure_google_object, args=(serial, base_url), daemon=True).start()
     now = int(datetime.now(timezone.utc).timestamp())
-    if ok:
-        loyalty_payload = [{"id": _gw_object_id(serial)}]
-    else:
-        obj = build_google_loyalty_object(serial, base_url)
-        if not obj:
-            return None, f"Google respondió {status}: {str(resp)[:200]}"
-        loyalty_payload = [obj]
     claims = {
         "iss": sa["client_email"], "aud": "google", "typ": "savetowallet", "iat": now,
         "origins": [base_url],
-        "payload": {"loyaltyObjects": loyalty_payload},
+        "payload": {"loyaltyObjects": [obj]},
     }
     return f"https://pay.google.com/gp/v/save/{_gw_sign_jwt(claims, sa)}", None
 
