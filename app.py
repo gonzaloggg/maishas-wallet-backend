@@ -44,7 +44,7 @@ BARISTA_LOGIN_HTML = """
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Maishas Café — Barista POS</title>
     <meta name="theme-color" content="#0D0C0B">
     <meta name="mobile-web-app-capable" content="yes">
@@ -64,6 +64,12 @@ BARISTA_LOGIN_HTML = """
             --border-subtle: rgba(255, 255, 255, 0.1);
         }
         * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+        html, body {
+            overflow-x: hidden;
+            max-width: 100vw;
+            touch-action: manipulation;
+            -webkit-text-size-adjust: 100%;
+        }
         body {
             margin: 0;
             min-height: 100vh;
@@ -119,7 +125,7 @@ BARISTA_LOGIN_HTML = """
             border-radius: 13px;
             padding: 13px 14px;
             color: var(--text-primary);
-            font-size: 15px;
+            font-size: 16px;
             margin-bottom: 12px;
             outline: none;
         }
@@ -1736,7 +1742,7 @@ BARISTA_HTML = """
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Maishas Café — Barista POS</title>
     <meta name="theme-color" content="#0D0C0B">
     <meta name="mobile-web-app-capable" content="yes">
@@ -1765,6 +1771,13 @@ BARISTA_HTML = """
             --text-tertiary: #6E675F;
         }
         * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+        html, body {
+            overflow-x: hidden;
+            width: 100%;
+            max-width: 100vw;
+            touch-action: manipulation;
+            -webkit-text-size-adjust: 100%;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
             font-variant-numeric: tabular-nums;
@@ -1776,6 +1789,10 @@ BARISTA_HTML = """
             margin: 0;
             padding: 0 0 60px;
             min-height: 100vh;
+        }
+        input, textarea, select {
+            font-size: 16px !important;
+            max-width: 100%;
         }
 
         .dynamic-island-wrap {
@@ -1889,7 +1906,7 @@ BARISTA_HTML = """
         }
         .kpi-pill.kpi-bday strong { color: #FF375F; }
 
-        .spotlight-wrap { position: relative; min-width: 260px; flex: 1; max-width: 340px; }
+        .spotlight-wrap { position: relative; min-width: 0; width: 100%; flex: 1 1 220px; max-width: 340px; }
         .spotlight-input {
             width: 100%;
             padding: 9px 52px 9px 34px;
@@ -1897,7 +1914,7 @@ BARISTA_HTML = """
             border: 1px solid var(--border-subtle);
             background: rgba(255, 255, 255, 0.05);
             color: var(--text-primary);
-            font-size: 13.5px;
+            font-size: 16px;
             font-family: inherit;
         }
         .spotlight-input:focus {
@@ -1930,7 +1947,7 @@ BARISTA_HTML = """
             pointer-events: none;
         }
 
-        .main-container { max-width: 1280px; margin: 22px auto 0; padding: 0 24px; }
+        .main-container { max-width: 1280px; margin: 22px auto 0; padding: 0 24px; width: 100%; }
         .bento-grid {
             display: grid;
             grid-template-columns: 1fr;
@@ -1943,11 +1960,13 @@ BARISTA_HTML = """
             gap: 18px;
             margin-bottom: 22px;
         }
+        .bento-grid > *, .tab-split-grid > * { min-width: 0; max-width: 100%; }
         @media (max-width: 960px) { .tab-split-grid { grid-template-columns: 1fr; } }
         @media (max-width: 760px) {
             .bento-grid { grid-template-columns: 1fr; }
             .sticky-header { padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 12px; }
             .main-container { padding: 0 14px; }
+            .spotlight-wrap { max-width: 100%; flex-basis: 100%; }
         }
 
         .bento-card {
@@ -1961,8 +1980,10 @@ BARISTA_HTML = """
             display: flex;
             flex-direction: column;
             justify-content: space-between;
+            min-width: 0;
+            max-width: 100%;
         }
-        .bento-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+        .bento-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
         .bento-title { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; margin: 0; display: flex; align-items: center; gap: 8px; }
         .bento-subtitle { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; line-height: 1.4; }
 
@@ -2048,12 +2069,13 @@ BARISTA_HTML = """
         .quick-scan-form { display: flex; gap: 8px; }
         .input-dark {
             width: 100%;
+            min-width: 0;
             padding: 10px 12px;
             border-radius: 11px;
             border: 1px solid var(--border-subtle);
             background: rgba(10, 9, 8, 0.7);
             color: var(--text-primary);
-            font-size: 13px;
+            font-size: 16px;
             font-family: inherit;
         }
         .input-dark:focus { outline: none; border-color: var(--gold); }
@@ -2974,7 +2996,7 @@ BARISTA_HTML = """
                                 </div>
 
                                 <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
-                                    <select name="target" id="push-target-select" class="input-dark" style="flex:1; min-width:220px;">
+                                    <select name="target" id="push-target-select" class="input-dark" style="flex:1; min-width:160px; max-width:100%;">
                                         <option value="all">📲 Todos ({{ installed_count }} teléfonos activos)</option>
                                         {% for client in clients %}
                                         <option value="{{ client.serial }}">{{ client.name }} ({{ client.serial }})</option>
@@ -2997,12 +3019,12 @@ BARISTA_HTML = """
 
                         <div id="mkt-pane-gps">
                             <form action="/api/update-location" method="POST">
-                                <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:8px; margin-bottom:10px;">
-                                    <div>
+                                <div style="display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap:8px; margin-bottom:10px;">
+                                    <div style="min-width:0;">
                                         <label style="font-size:10.5px; color:var(--gold-light);">Latitud</label>
                                         <input type="text" id="lat-input" name="lat" class="input-dark" value="{{ shop_loc.lat }}" required>
                                     </div>
-                                    <div>
+                                    <div style="min-width:0;">
                                         <label style="font-size:10.5px; color:var(--gold-light);">Longitud</label>
                                         <input type="text" id="lng-input" name="lng" class="input-dark" value="{{ shop_loc.lng }}" required>
                                     </div>
