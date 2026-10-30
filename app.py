@@ -1781,14 +1781,20 @@ BARISTA_HTML = """
         .main-container { max-width: 1280px; margin: 22px auto 0; padding: 0 24px; }
         .bento-grid {
             display: grid;
-            grid-template-columns: 1.05fr 0.95fr 1.15fr;
+            grid-template-columns: 1fr;
             gap: 18px;
             margin-bottom: 22px;
         }
-        @media (max-width: 1100px) { .bento-grid { grid-template-columns: 1fr 1fr; } }
+        .tab-split-grid {
+            display: grid;
+            grid-template-columns: 1.15fr 0.85fr;
+            gap: 18px;
+            margin-bottom: 22px;
+        }
+        @media (max-width: 960px) { .tab-split-grid { grid-template-columns: 1fr; } }
         @media (max-width: 760px) {
             .bento-grid { grid-template-columns: 1fr; }
-            .sticky-header { padding: 12px 16px; }
+            .sticky-header { padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 12px; }
             .main-container { padding: 0 14px; }
         }
 
@@ -2441,13 +2447,19 @@ BARISTA_HTML = """
                 </div>
             </div>
 
-            <!-- Pestañas de Vista Principal (Mostrador vs Base de Datos y Machote Excel) -->
+            <!-- Pestañas de Vista Principal (Mostrador, Cumpleañeros, Alertas Push, Base de Datos) -->
             <div class="main-nav-tabs">
                 <button type="button" id="nav-btn-pos" class="nav-tab-btn active" onclick="switchMainView('pos')">
                     ☕️ Mostrador POS
                 </button>
+                <button type="button" id="nav-btn-bday" class="nav-tab-btn" onclick="switchMainView('bday')">
+                    🎂 Cumpleañeros ({{ upcoming_birthdays|length }})
+                </button>
+                <button type="button" id="nav-btn-push" class="nav-tab-btn" onclick="switchMainView('push')">
+                    📣 Alertas Push
+                </button>
                 <button type="button" id="nav-btn-db" class="nav-tab-btn" onclick="switchMainView('db')">
-                    📊 Base de Datos de Clientes ({{ clients|length }})
+                    📊 Base de Datos ({{ clients|length }})
                 </button>
                 <a href="/api/export-clients.csv" class="btn-export-csv" title="Descargar machote de clientes en formato Excel (.CSV)">
                     📥 Descargar Machote Excel
@@ -2466,7 +2478,7 @@ BARISTA_HTML = """
     </header>
 
     <main class="main-container">
-        <!-- VISTA 1: OPERACIÓN EN MOSTRADOR POS -->
+        <!-- VISTA 1: OPERACIÓN EN MOSTRADOR POS (SOLO ESCÁNER QR + LISTA DE CLIENTES) -->
         <div id="view-pos-container">
         <section class="bento-grid">
 
@@ -2504,131 +2516,6 @@ BARISTA_HTML = """
                     <input type="hidden" name="action" id="scan-action-input" value="add">
                     <button type="submit" class="btn-gold-sm">+1 Sello ☕️</button>
                 </form>
-            </div>
-
-            <!-- MÓDULO 2: 🎂 RADAR DE CUMPLEAÑOS -->
-            <div class="bento-card bday-card-widget">
-                <div>
-                    <div class="bento-header">
-                        <h2 class="bento-title">🎂 Radar de Cumpleaños</h2>
-                        <span style="font-size:11px; font-weight:700; color:#FF6B88; background:rgba(255,55,95,0.14); padding:4px 9px; border-radius:99px;">
-                            Hoy y próx. 7 días
-                        </span>
-                    </div>
-                    <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su celular con 1 clic.</p>
-
-                    <div class="bday-list">
-                        {% for bclient in upcoming_birthdays %}
-                        <div class="bday-item {{ 'is-today' if bclient.bday.is_today else '' }}">
-                            <div style="min-width:0;">
-                                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                                    <strong style="font-size:13.5px; color:var(--text-primary);">{{ bclient.name }}</strong>
-                                    <span class="{{ 'bday-badge-today' if bclient.bday.is_today else 'bday-badge-soon' }}">
-                                        {{ bclient.bday.badge_text }}
-                                    </span>
-                                </div>
-                                <div style="font-size:11px; color:var(--text-secondary); margin-top:2px;">
-                                    {{ bclient.tier.badge }} · {{ bclient.stamps }}/10 sellos
-                                </div>
-                            </div>
-                            <form action="/api/send-message" method="POST" style="margin:0;">
-                                <input type="hidden" name="target" value="{{ bclient.serial }}">
-                                <input type="hidden" name="message" value="🎂 ¡Feliz cumpleaños, {{ bclient.first_name }}! Te esperamos en Maishas Café con una sorpresa especial para celebrar tu día ☕️✨">
-                                <button type="submit" class="btn-bday-gift">
-                                    🎁 Enviar Regalo Push
-                                </button>
-                            </form>
-                        </div>
-                        {% else %}
-                        <div style="text-align:center; padding:26px 12px; color:var(--text-secondary); font-size:12.5px; background:rgba(0,0,0,0.2); border-radius:14px;">
-                            <div style="font-size:22px; margin-bottom:6px;">🗓️</div>
-                            No hay cumpleaños registrados para hoy ni en los próximos 7 días.
-                            {% if month_birthdays_count > 0 %}
-                            <div style="margin-top:6px; color:var(--gold-light); cursor:pointer; font-weight:600;" onclick="setFilterTab('bday')">
-                                Ver {{ month_birthdays_count }} cumpleañero(s) de este mes →
-                            </div>
-                            {% endif %}
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-
-                <div style="font-size:11px; color:var(--text-secondary); margin-top:10px; display:flex; justify-content:space-between;">
-                    <span>🎂 Cumpleañeros del mes: <strong>{{ month_birthdays_count }}</strong></span>
-                    <a href="javascript:void(0)" onclick="setFilterTab('bday')" style="color:#FF6B88; text-decoration:none; font-weight:600;">Filtrar en lista ↓</a>
-                </div>
-            </div>
-
-            <!-- MÓDULO 3: MARKETING PUSH & GEOLOCALIZACIÓN GPS -->
-            <div class="bento-card">
-                <div>
-                    <div class="bento-header">
-                        <h2 class="bento-title" id="mkt-card-title">📣 Marketing Push</h2>
-                        <div class="segmented-control">
-                            <button type="button" id="tab-btn-push" class="seg-btn active" onclick="switchMktTab('push')">📣 Push</button>
-                            <button type="button" id="tab-btn-gps" class="seg-btn" onclick="switchMktTab('gps')">📍 GPS ({{ "%.2f"|format(shop_loc.lat) }})</button>
-                        </div>
-                    </div>
-
-                    <div id="mkt-pane-push">
-                        <div class="chip-row">
-                            <button type="button" class="action-chip" onclick="setTemplate('🥐 ¡Recién salidos del horno! Ven por tu pan calientito y suma tu sello de hoy ☕️')">🥐 Pan horneado</button>
-                            <button type="button" class="action-chip" onclick="setTemplate('✨ ¡Hora Feliz en Maishas Café! 2x1 en bebidas seleccionadas hoy de 4 a 6 pm ☕️')">✨ Hora Feliz 2x1</button>
-                            <button type="button" class="action-chip" onclick="setTemplate('🔥 ¡Hoy tus compras valen DOBLE sello en Maishas Café! Te esperamos ☕️')">🔥 Doble Sello</button>
-                        </div>
-
-                        <form action="/api/send-message" method="POST">
-                            <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="2" placeholder="Escribe una promoción o aviso para tus clientes..." required oninput="updateLockScreenPreview(this.value)"></textarea>
-
-                            <div class="ios-lockscreen-preview">
-                                <div class="ios-notif-icon">☕️</div>
-                                <div class="ios-notif-body">
-                                    <div class="ios-notif-top">
-                                        <span>MAISHAS CAFÉ</span>
-                                        <span>ahora</span>
-                                    </div>
-                                    <div class="ios-notif-text" id="ios-preview-text">📣 Escribe un mensaje para previsualizar...</div>
-                                </div>
-                            </div>
-
-                            <div style="display:flex; gap:8px; margin-top:8px;">
-                                <select name="target" id="push-target-select" class="input-dark" style="flex:1;">
-                                    <option value="all">📲 Todos ({{ installed_count }} teléfonos activos)</option>
-                                    {% for client in clients %}
-                                    <option value="{{ client.serial }}">{{ client.name }} ({{ client.serial }})</option>
-                                    {% endfor %}
-                                </select>
-                                <button type="submit" class="btn-cam-launch" style="white-space:nowrap;">Enviar Push 📲</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <div id="mkt-pane-gps" style="display:none;">
-                        <p class="bento-subtitle">Alerta automática cuando el cliente pasa a ~150m de la cafetería.</p>
-                        <form action="/api/update-location" method="POST">
-                            <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:8px; margin-bottom:8px;">
-                                <div>
-                                    <label style="font-size:10.5px; color:var(--gold-light);">Latitud</label>
-                                    <input type="text" id="lat-input" name="lat" class="input-dark" value="{{ shop_loc.lat }}" required>
-                                </div>
-                                <div>
-                                    <label style="font-size:10.5px; color:var(--gold-light);">Longitud</label>
-                                    <input type="text" id="lng-input" name="lng" class="input-dark" value="{{ shop_loc.lng }}" required>
-                                </div>
-                                <div style="display:flex; align-items:flex-end;">
-                                    <button type="button" class="btn-gold-sm" onclick="detectMyGPS()">📍 Mi GPS</button>
-                                </div>
-                            </div>
-                            <div style="margin-bottom:10px;">
-                                <label style="font-size:10.5px; color:var(--gold-light);">Mensaje al pasar cerca:</label>
-                                <input type="text" name="relevant_text" class="input-dark" value="{{ shop_loc.relevant_text }}" maxlength="160" required>
-                            </div>
-                            <button type="submit" class="btn-cam-launch" style="width:100%; justify-content:center;">
-                                💾 Guardar GPS y Sincronizar Pases
-                            </button>
-                        </form>
-                    </div>
-                </div>
             </div>
         </section>
 
@@ -2772,7 +2659,220 @@ BARISTA_HTML = """
         </section>
         </div>
 
-        <!-- VISTA 2: BASE DE DATOS EJECUTIVA Y DESCARGA DE MACHOTE EXCEL (.CSV) -->
+        <!-- VISTA 2: 🎂 PESTAÑA DE CUMPLEAÑEROS -->
+        <section id="view-bday-container" class="db-view-section">
+            <div class="db-header-card">
+                <div>
+                    <h2 style="margin:0; font-size:20px; font-weight:800; color:var(--text-primary);">
+                        🎂 Radar y Directorio de Cumpleañeros
+                    </h2>
+                    <p style="margin:4px 0 0; font-size:13px; color:var(--text-secondary);">
+                        Consulta quiénes cumplen años hoy, en los próximos 7 días o durante este mes, y envíales su felicitación o regalo directo al celular con 1 clic.
+                    </p>
+                </div>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <span style="font-size:12.5px; font-weight:700; color:#FF6B88; background:rgba(255,55,95,0.14); padding:7px 14px; border-radius:99px; border:1px solid rgba(255,55,95,0.35);">
+                        🎂 Hoy y próx. 7 días: {{ upcoming_birthdays|length }} · Este mes: {{ month_birthdays_count }}
+                    </span>
+                </div>
+            </div>
+
+            <div class="tab-split-grid">
+                <!-- Columna 1: Radar Hoy y Próximos 7 días -->
+                <div class="bento-card bday-card-widget">
+                    <div>
+                        <div class="bento-header">
+                            <h2 class="bento-title">🎉 Cumpleaños de Hoy y Próximos 7 Días</h2>
+                            <span style="font-size:11px; font-weight:700; color:#FF6B88; background:rgba(255,55,95,0.14); padding:4px 9px; border-radius:99px;">
+                                Prioridad
+                            </span>
+                        </div>
+                        <p class="bday-subtitle bento-subtitle">Envía una felicitación o regalo directo a su celular (Apple Wallet / Google Wallet) con 1 clic.</p>
+
+                        <div class="bday-list" style="max-height:420px;">
+                            {% for bclient in upcoming_birthdays %}
+                            <div class="bday-item {{ 'is-today' if bclient.bday.is_today else '' }}">
+                                <div style="min-width:0;">
+                                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                                        <strong style="font-size:14px; color:var(--text-primary);">{{ bclient.name }}</strong>
+                                        <span class="{{ 'bday-badge-today' if bclient.bday.is_today else 'bday-badge-soon' }}">
+                                            {{ bclient.bday.badge_text }}
+                                        </span>
+                                    </div>
+                                    <div style="font-size:11.5px; color:var(--text-secondary); margin-top:3px;">
+                                        {{ bclient.tier.badge }} · {{ bclient.stamps }}/10 sellos
+                                        {% if bclient.phone %} · 📱 {{ bclient.phone }}{% endif %}
+                                    </div>
+                                </div>
+                                <div style="display:flex; gap:6px; align-items:center;">
+                                    <form action="/api/send-message" method="POST" style="margin:0;">
+                                        <input type="hidden" name="target" value="{{ bclient.serial }}">
+                                        <input type="hidden" name="message" value="🎂 ¡Feliz cumpleaños, {{ bclient.first_name }}! Te esperamos en Maishas Café con una sorpresa especial para celebrar tu día ☕️✨">
+                                        <button type="submit" class="btn-bday-gift">
+                                            🎁 Enviar Regalo Push
+                                        </button>
+                                    </form>
+                                    <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" onclick="selectClientForPush('{{ bclient.serial }}', '{{ bclient.name|e }}')">💬</button>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div style="text-align:center; padding:34px 16px; color:var(--text-secondary); font-size:13px; background:rgba(0,0,0,0.2); border-radius:14px;">
+                                <div style="font-size:26px; margin-bottom:8px;">🗓️</div>
+                                No hay cumpleaños registrados para hoy ni en los próximos 7 días.
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Columna 2: Todos los clientes con fecha de cumpleaños registrada -->
+                <div class="bento-card">
+                    <div>
+                        <div class="bento-header">
+                            <h2 class="bento-title">📅 Todos los Cumpleaños Registrados</h2>
+                            <span style="font-size:11px; color:var(--gold-light);">Del mes: <strong>{{ month_birthdays_count }}</strong></span>
+                        </div>
+                        <p class="bento-subtitle">Lista completa de clientes con fecha de nacimiento registrada.</p>
+
+                        <div class="bday-list" style="max-height:420px;">
+                            {% set ns = namespace(has_any_bday=false) %}
+                            {% for client in clients %}
+                                {% if client.bday.has_birthdate %}
+                                {% set ns.has_any_bday = true %}
+                                <div class="bday-item {{ 'is-today' if client.bday.is_today else '' }}">
+                                    <div style="min-width:0;">
+                                        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                                            <strong style="font-size:13.5px; color:var(--text-primary);">{{ client.name }}</strong>
+                                            <span class="{{ 'bday-badge-today' if client.bday.is_today else 'bday-badge-soon' }}">
+                                                {{ client.bday.badge_text }}
+                                            </span>
+                                        </div>
+                                        <div style="font-size:11px; color:var(--text-secondary); margin-top:2px;">
+                                            {{ client.tier.badge }} · {{ client.stamps }}/10 sellos · {{ client.serial }}
+                                        </div>
+                                    </div>
+                                    <div style="display:flex; gap:6px; align-items:center;">
+                                        <form action="/api/send-message" method="POST" style="margin:0;">
+                                            <input type="hidden" name="target" value="{{ client.serial }}">
+                                            <input type="hidden" name="message" value="🎂 ¡Feliz cumpleaños, {{ client.first_name }}! Te esperamos en Maishas Café con una sorpresa especial para celebrar tu día ☕️✨">
+                                            <button type="submit" class="btn-bday-gift">
+                                                🎁 Felicitación
+                                            </button>
+                                        </form>
+                                        <button type="button" class="btn-icon-sec" title="Escribir mensaje personalizado" onclick="selectClientForPush('{{ client.serial }}', '{{ client.name|e }}')">💬</button>
+                                    </div>
+                                </div>
+                                {% endif %}
+                            {% endfor %}
+                            {% if not ns.has_any_bday %}
+                            <div style="text-align:center; padding:34px 16px; color:var(--text-secondary); font-size:13px; background:rgba(0,0,0,0.2); border-radius:14px;">
+                                Aún no hay clientes con fecha de cumpleaños capturada.
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VISTA 3: 📣 PESTAÑA DE ALERTAS PUSH & GEOLOCALIZACIÓN GPS -->
+        <section id="view-push-container" class="db-view-section">
+            <div class="db-header-card">
+                <div>
+                    <h2 style="margin:0; font-size:20px; font-weight:800; color:var(--text-primary);">
+                        📣 Centro de Alertas Push y Geovalla GPS
+                    </h2>
+                    <p style="margin:4px 0 0; font-size:13px; color:var(--text-secondary);">
+                        Envía promociones o avisos en tiempo real a todos los teléfonos activos ({{ installed_count }}) o a un cliente específico en Apple Wallet y Google Wallet.
+                    </p>
+                </div>
+            </div>
+
+            <div class="tab-split-grid">
+                <!-- Columna 1: Envío de Alertas Push -->
+                <div class="bento-card">
+                    <div>
+                        <div class="bento-header">
+                            <h2 class="bento-title" id="mkt-card-title">📣 Enviar Alerta Push</h2>
+                            <span style="font-size:11px; font-weight:700; color:var(--gold-light); background:rgba(212,175,55,0.14); padding:4px 10px; border-radius:99px;">
+                                📲 {{ installed_count }} teléfonos activos
+                            </span>
+                        </div>
+                        <p class="bento-subtitle">Selecciona una plantilla rápida o escribe tu mensaje personalizado:</p>
+
+                        <div id="mkt-pane-push">
+                            <div class="chip-row" style="margin-bottom:12px;">
+                                <button type="button" class="action-chip" onclick="setTemplate('🥐 ¡Recién salidos del horno! Ven por tu pan calientito y suma tu sello de hoy ☕️')">🥐 Pan horneado</button>
+                                <button type="button" class="action-chip" onclick="setTemplate('✨ ¡Hora Feliz en Maishas Café! 2x1 en bebidas seleccionadas hoy de 4 a 6 pm ☕️')">✨ Hora Feliz 2x1</button>
+                                <button type="button" class="action-chip" onclick="setTemplate('🔥 ¡Hoy tus compras valen DOBLE sello en Maishas Café! Te esperamos ☕️')">🔥 Doble Sello</button>
+                            </div>
+
+                            <form action="/api/send-message" method="POST">
+                                <textarea name="message" id="push-msg-box" class="input-dark" maxlength="200" rows="3" placeholder="Escribe una promoción o aviso para tus clientes..." required oninput="updateLockScreenPreview(this.value)"></textarea>
+
+                                <div class="ios-lockscreen-preview" style="margin:12px 0;">
+                                    <div class="ios-notif-icon">☕️</div>
+                                    <div class="ios-notif-body">
+                                        <div class="ios-notif-top">
+                                            <span>MAISHAS CAFÉ</span>
+                                            <span>ahora</span>
+                                        </div>
+                                        <div class="ios-notif-text" id="ios-preview-text">📣 Escribe un mensaje para previsualizar...</div>
+                                    </div>
+                                </div>
+
+                                <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
+                                    <select name="target" id="push-target-select" class="input-dark" style="flex:1; min-width:220px;">
+                                        <option value="all">📲 Todos ({{ installed_count }} teléfonos activos)</option>
+                                        {% for client in clients %}
+                                        <option value="{{ client.serial }}">{{ client.name }} ({{ client.serial }})</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button type="submit" class="btn-cam-launch" style="white-space:nowrap;">Enviar Push 📲</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Columna 2: Geolocalización GPS (~150m) -->
+                <div class="bento-card">
+                    <div>
+                        <div class="bento-header">
+                            <h2 class="bento-title">📍 Geovalla GPS ({{ "%.4f"|format(shop_loc.lat) }}, {{ "%.4f"|format(shop_loc.lng) }})</h2>
+                        </div>
+                        <p class="bento-subtitle">Alerta automática en pantalla de bloqueo cuando el cliente pasa a ~150m de Maishas Café.</p>
+
+                        <div id="mkt-pane-gps">
+                            <form action="/api/update-location" method="POST">
+                                <div style="display:grid; grid-template-columns: 1fr 1fr auto; gap:8px; margin-bottom:10px;">
+                                    <div>
+                                        <label style="font-size:10.5px; color:var(--gold-light);">Latitud</label>
+                                        <input type="text" id="lat-input" name="lat" class="input-dark" value="{{ shop_loc.lat }}" required>
+                                    </div>
+                                    <div>
+                                        <label style="font-size:10.5px; color:var(--gold-light);">Longitud</label>
+                                        <input type="text" id="lng-input" name="lng" class="input-dark" value="{{ shop_loc.lng }}" required>
+                                    </div>
+                                    <div style="display:flex; align-items:flex-end;">
+                                        <button type="button" class="btn-gold-sm" onclick="detectMyGPS()">📍 Mi GPS</button>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom:14px;">
+                                    <label style="font-size:10.5px; color:var(--gold-light);">Mensaje al pasar cerca:</label>
+                                    <input type="text" name="relevant_text" class="input-dark" value="{{ shop_loc.relevant_text }}" maxlength="160" required>
+                                </div>
+                                <button type="submit" class="btn-cam-launch" style="width:100%; justify-content:center;">
+                                    💾 Guardar GPS y Sincronizar Pases
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- VISTA 4: BASE DE DATOS EJECUTIVA Y DESCARGA DE MACHOTE EXCEL (.CSV) -->
         <section id="view-db-container" class="db-view-section">
             <div class="db-header-card">
                 <div>
@@ -2874,22 +2974,26 @@ BARISTA_HTML = """
             }, 6500);
         }
 
-        // Cambio entre Vista Mostrador POS y Vista Base de Datos / Excel
+        // Cambio entre las 4 pestañas principales: Mostrador POS, Cumpleañeros, Alertas Push y Base de Datos
         function switchMainView(view) {
-            const posContainer = document.getElementById('view-pos-container');
-            const dbContainer = document.getElementById('view-db-container');
-            const btnPos = document.getElementById('nav-btn-pos');
-            const btnDb = document.getElementById('nav-btn-db');
-            if (view === 'db') {
-                posContainer.style.display = 'none';
-                dbContainer.style.display = 'block';
-                btnPos.classList.remove('active');
-                btnDb.classList.add('active');
-            } else {
-                posContainer.style.display = 'block';
-                dbContainer.style.display = 'none';
-                btnPos.classList.add('active');
-                btnDb.classList.remove('active');
+            const views = {
+                pos: document.getElementById('view-pos-container'),
+                bday: document.getElementById('view-bday-container'),
+                push: document.getElementById('view-push-container'),
+                db: document.getElementById('view-db-container')
+            };
+            const btns = {
+                pos: document.getElementById('nav-btn-pos'),
+                bday: document.getElementById('nav-btn-bday'),
+                push: document.getElementById('nav-btn-push'),
+                db: document.getElementById('nav-btn-db')
+            };
+            Object.keys(views).forEach(k => {
+                if (views[k]) views[k].style.display = (k === view) ? 'block' : 'none';
+                if (btns[k]) btns[k].classList.toggle('active', k === view);
+            });
+            if (view !== 'pos' && typeof scanning !== 'undefined' && scanning) {
+                stopScanner();
             }
         }
 
@@ -2973,8 +3077,7 @@ BARISTA_HTML = """
         }
 
         function selectClientForPush(serial, name) {
-            switchMainView('pos');
-            switchMktTab('push');
+            switchMainView('push');
             const sel = document.getElementById('push-target-select');
             const box = document.getElementById('push-msg-box');
             if (sel) sel.value = serial;
