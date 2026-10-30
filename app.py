@@ -854,9 +854,18 @@ REGISTRATION_HTML = """
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
+            gap: 10px;
             box-shadow: 0 8px 24px rgba(212, 175, 55, 0.3);
             transition: transform 0.15s ease, box-shadow 0.15s ease;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            touch-action: manipulation;
+        }
+        .btn-submit-wallet * {
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
         .btn-submit-wallet:active {
             transform: scale(0.98);
@@ -926,8 +935,20 @@ REGISTRATION_HTML = """
         (function detectDeviceAutomatically() {
             const ua = navigator.userAgent || navigator.vendor || window.opera || '';
             const platInput = document.getElementById('platform-input');
+            const submitBtn = document.getElementById('submit-wallet-btn');
             if (/android/i.test(ua)) {
                 platInput.value = 'android';
+                if (submitBtn) {
+                    submitBtn.innerHTML = `
+                        <svg width="28" height="24" viewBox="21 12.5 36 30" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+                            <path d="M57 23.791H21V18.1456C21 15.0809 23.6422 12.5001 26.7798 12.5001H51.2202C54.3578 12.5001 57 15.0809 57 18.1456V23.791Z" fill="#34A853"/>
+                            <path d="M57 29H21V23C21 19.7429 23.6422 17 26.7798 17H51.2202C54.3578 17 57 19.7429 57 23V29Z" fill="#FBBC04"/>
+                            <path d="M57 34H21V28C21 24.7429 23.6422 22 26.7798 22H51.2202C54.3578 22 57 24.7429 57 28V34Z" fill="#EA4335"/>
+                            <path d="M21 25.2409L43.8493 30.4025C46.4795 31.0477 49.4384 30.4025 51.5753 28.7895L57 24.9183V37.0157C57 40.0804 54.3699 42.4999 51.2466 42.4999H26.7534C23.6301 42.4999 21 40.0804 21 37.0157V25.2409Z" fill="#4285F4"/>
+                        </svg>
+                        <span>Obtener Tarjeta en Google Wallet</span>
+                    `;
+                }
             } else if (/iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
                 platInput.value = 'ios';
             }
@@ -1291,6 +1312,45 @@ ANDROID_CARD_HTML = """
             align-items: center;
             justify-content: center;
             gap: 6px;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            touch-action: manipulation;
+        }
+
+        /* Botón Oficial Agregar a Google Wallet (Negro Píldora + Ícono Multicolor Oficial) */
+        .btn-google-wallet-official {
+            width: 100%;
+            min-height: 56px;
+            padding: 12px 22px;
+            border-radius: 999px;
+            border: 1.5px solid #747775;
+            background: #1F1F1F;
+            color: #FFFFFF;
+            text-decoration: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.65);
+            transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            -webkit-user-drag: none;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .btn-google-wallet-official:active {
+            transform: scale(0.98);
+            background: #2C2C2C;
+            border-color: #A8C7FA;
+        }
+        .btn-google-wallet-official * {
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         /* Botones de Acción Android (Notificaciones Push e Instalar en Inicio) */
@@ -1318,6 +1378,15 @@ ANDROID_CARD_HTML = """
             gap: 8px;
             text-decoration: none;
             box-shadow: 0 8px 24px rgba(212, 175, 55, 0.3);
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            touch-action: manipulation;
+        }
+        .btn-action-gold * {
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
         .btn-action-glass {
             width: 100%;
@@ -1334,6 +1403,10 @@ ANDROID_CARD_HTML = """
             justify-content: center;
             gap: 8px;
             text-decoration: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            touch-action: manipulation;
         }
     </style>
 </head>
@@ -1362,41 +1435,54 @@ ANDROID_CARD_HTML = """
         </button>
     </div>
 
-    <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN BILLETERA ANDROID + ACTIVAR PUSH EN VIVO -->
+    <!-- CAJA PRINCIPAL ARRIBA: GUARDAR EN GOOGLE WALLET + ALERTAS EN VIVO -->
     <div class="wallet-cta-box">
         <div class="wallet-cta-title">
-            <span>📲 Billetera Digital y Alertas en Vivo</span>
+            <span>📲 Guardar Tarjeta en tu Celular</span>
             <span style="font-size:11px; color:var(--gold); font-weight:700; font-family:ui-monospace, monospace;">{{ client.serial }}</span>
         </div>
 
+        {% if gw_enabled %}
+        <a href="{{ gw_save_url }}"
+           id="btn-google-wallet"
+           class="btn-google-wallet-official"
+           target="_top"
+           rel="noopener"
+           draggable="false">
+            <svg width="36" height="30" viewBox="21 12.5 36 30" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+                <path d="M57 23.791H21V18.1456C21 15.0809 23.6422 12.5001 26.7798 12.5001H51.2202C54.3578 12.5001 57 15.0809 57 18.1456V23.791Z" fill="#34A853"/>
+                <path d="M57 29H21V23C21 19.7429 23.6422 17 26.7798 17H51.2202C54.3578 17 57 19.7429 57 23V29Z" fill="#FBBC04"/>
+                <path d="M57 34H21V28C21 24.7429 23.6422 22 26.7798 22H51.2202C54.3578 22 57 24.7429 57 28V34Z" fill="#EA4335"/>
+                <path d="M21 25.2409L43.8493 30.4025C46.4795 31.0477 49.4384 30.4025 51.5753 28.7895L57 24.9183V37.0157C57 40.0804 54.3699 42.4999 51.2466 42.4999H26.7534C23.6301 42.4999 21 40.0804 21 37.0157V25.2409Z" fill="url(#gw_blue_grad)"/>
+                <defs>
+                    <linearGradient id="gw_blue_grad" x1="37.2843" y1="34.0448" x2="18.7823" y2="55.7227" gradientUnits="userSpaceOnUse">
+                        <stop stop-color="#4285F4"/>
+                        <stop offset="1" stop-color="#1B74E8"/>
+                    </linearGradient>
+                </defs>
+            </svg>
+            <span style="display:flex; flex-direction:column; align-items:flex-start; line-height:1.15;">
+                <span style="font-size:11.5px; font-weight:500; color:#E3E3E3;">Agregar a la</span>
+                <span id="gw-btn-main-text" style="font-size:16.5px; font-weight:700; color:#FFFFFF; letter-spacing:0.1px;">Billetera de Google</span>
+            </span>
+        </a>
+        <div style="font-size:11.5px; color:var(--text-muted); text-align:center; line-height:1.4;">
+            Tus sellos ({{ client.stamps }}/10) y avisos se actualizan solos dentro de Google Wallet.
+        </div>
+        {% else %}
         <div id="push-required-notice" style="background:rgba(212,175,55,0.13); border:1px solid rgba(212,175,55,0.4); border-radius:12px; padding:9px 12px; font-size:12px; color:#F5E3B3; line-height:1.4;">
             🔔 <strong>Importante en Android:</strong> Al tocar el botón dorado selecciona <strong>«Permitir notificaciones»</strong> para que tus sellos y avisos te lleguen al instante.
         </div>
-
-        {% if gw_enabled %}
-        <a href="/card/{{ client.serial }}/google-wallet"
-           id="btn-google-wallet"
-           class="btn-action-gold"
-           style="background:#000; color:#fff; border:1.5px solid #5f6368; gap:10px;"
-           onclick="onSaveToWalletClick()">
-            <span style="font-size:20px;">🅖</span>
-            <span id="btn-save-wallet-label">Agregar a Google Wallet · {{ client.stamps }}/10 sellos</span>
-        </a>
-        <div style="font-size:11.5px; color:var(--text-muted); text-align:center; line-height:1.4;">
-            Tus sellos y avisos se actualizan solos dentro de Google Wallet, igual que en Apple Wallet.
-        </div>
-        {% else %}
         <a href="/card/{{ client.serial }}/download.pkpass?v={{ client.updated_at | urlencode }}"
            id="btn-save-wallet-top"
            class="btn-action-gold"
            onclick="onSaveToWalletClick()">
             <span id="btn-save-wallet-label">📲 Activar Alertas y Guardar en Wallet ({{ client.stamps }}/10)</span>
         </a>
-        {% endif %}
-
         <div id="wallet-download-hint" class="wallet-step-hint">
             ✅ <strong>Pase {{ client.serial }} descargado ({{ client.stamps }}/10 sellos):</strong> Toca <strong>«Abrir»</strong> en la descarga para guardarlo en tu <strong>Billetera</strong>, y toca <strong>«Permitir»</strong> si tu celular te pregunta por las notificaciones.
         </div>
+        {% endif %}
 
         <div class="wallet-sub-links">
             <button type="button" id="btn-enable-push-top" class="btn-mini-intent" onclick="enableAndroidPush(false)" style="border-color:rgba(212,175,55,0.45); color:#E6C280; width:100%;">
@@ -4114,12 +4200,20 @@ def android_card_view(serial_number):
         "tier": tier,
         "reward_status": reward_status,
     }
+    gw_enabled = google_wallet_enabled()
+    gw_save_url = f"/card/{serial_id}/google-wallet"
+    if gw_enabled:
+        direct_url, _ = google_wallet_save_url(serial_id, _public_base_url())
+        if direct_url:
+            gw_save_url = direct_url
+
     return render_template_string(
         ANDROID_CARD_HTML,
         client=client_data,
         shop_loc=get_shop_location(),
         vapid_public_key=VAPID_PUBLIC_KEY,
-        gw_enabled=google_wallet_enabled()
+        gw_enabled=gw_enabled,
+        gw_save_url=gw_save_url
     )
 
 
@@ -5160,14 +5254,21 @@ def ensure_google_object(serial, base_url):
 def google_wallet_save_url(serial, base_url):
     """Link 'Agregar a Google Wallet' firmado (JWT corto: solo referencia el id del pase ya creado)."""
     ok, status, resp = ensure_google_object(serial, base_url)
-    if not ok:
-        return None, f"Google respondió {status}: {str(resp)[:200]}"
     sa = _load_google_sa()
+    if not sa:
+        return None, "Cuenta de servicio no disponible"
     now = int(datetime.now(timezone.utc).timestamp())
+    if ok:
+        loyalty_payload = [{"id": _gw_object_id(serial)}]
+    else:
+        obj = build_google_loyalty_object(serial, base_url)
+        if not obj:
+            return None, f"Google respondió {status}: {str(resp)[:200]}"
+        loyalty_payload = [obj]
     claims = {
         "iss": sa["client_email"], "aud": "google", "typ": "savetowallet", "iat": now,
         "origins": [base_url],
-        "payload": {"loyaltyObjects": [{"id": _gw_object_id(serial)}]},
+        "payload": {"loyaltyObjects": loyalty_payload},
     }
     return f"https://pay.google.com/gp/v/save/{_gw_sign_jwt(claims, sa)}", None
 
